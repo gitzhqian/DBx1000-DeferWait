@@ -12,7 +12,8 @@ We compare the performance of six supported protocols across diverse workloads i
 Experimental Results
 ------------
 The experimental results are attached here (including the configurations for each experiments).
-bash one-hotspot-test.sh
+
+   bash one-hotspot-test.sh
 
 
 
