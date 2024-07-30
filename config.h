@@ -5,17 +5,17 @@
 // Simulation + Hardware
 /***********************************************/
 #define TERMINATE_BY_COUNT true
-#define THREAD_CNT					20
+#define THREAD_CNT					4
 #define PART_CNT					1
 // each transaction only accesses 1 virtual partition. But the lock/ts manager and index are not aware of such partitioning. VIRTUAL_PART_CNT describes the request distribution and is only used to generate queries. For HSTORE, VIRTUAL_PART_CNT should be the same as PART_CNT.
 #define VIRTUAL_PART_CNT			1
 #define PAGE_SIZE					4096
 #define CL_SIZE						64
 // CPU_FREQ is used to get accurate timing info
-#define CPU_FREQ 					2.1 // in GHz/s
+#define CPU_FREQ 					3.5 // in GHz/s
 
 // # of transactions to run for warmup
-#define WARMUP						1000
+#define WARMUP						0
 
 // YCSB or TPCC
 #define WORKLOAD 					YCSB
@@ -39,18 +39,18 @@
 /***********************************************/
 // Concurrency Control
 /***********************************************/
-// WAIT_DIE, NO_WAIT, DL_DETECT, TIMESTAMP, MVCC, HEKATON, HSTORE, OCC, VLL, TICTOC, SILO, HOTSPOT_FRIENDLY , BAMBOO
+// WAIT_DIE, NO_WAIT, DL_DETECT, TIMESTAMP, MVCC, HEKATON, HSTORE, OCC, VLL, TICTOC, SILO, HOTSPOT_FRIENDLY, BAMBOO, WOUND_WAIT
 // TODO TIMESTAMP does not work at this moment
 #define CC_ALG 						HOTSPOT_FRIENDLY
 #define ISOLATION_LEVEL 			SERIALIZABLE
 
 // latch options
-#define LATCH LH_MCSLOCK
+#define LATCH                       LH_MCSLOCK
 
 // all transactions acquire tuples according to the primary key order.
 #define KEY_ORDER					false
 // transaction roll back changes after abort
-#define ROLL_BACK					true
+#define ROLL_BACK					false
 // per-row lock/ts management or central lock/ts management
 #define CENTRAL_MAN					false
 #define BUCKET_CNT					31
@@ -128,12 +128,12 @@
 /***********************************************/
 // Benchmark
 /***********************************************/
-#define INSERT_ENABLED              false
+#define INSERT_ENABLED              true
 #define THINKTIME				    0
 #define MAX_RUNTIME                 10
 // max number of rows touched per transaction
 // MAX_ROW_PER_TXN: the count of requests in a long transaction of YCSB
-#define MAX_ROW_PER_TXN             1000
+#define MAX_ROW_PER_TXN             100000
 #define QUERY_INTVL 				1UL
 // MAX_TXN_PER_PART: used to calculate the txn count of a thread
 #define MAX_TXN_PER_PART 			10000
@@ -141,7 +141,7 @@
 #define MAX_TUPLE_SIZE				1024 // in bytes
 #define MAX_FIELD_SIZE              50
 // ==== [YCSB] ====
-#define INIT_PARALLELISM			40
+#define INIT_PARALLELISM			4
 // SYNTH_TABLE_SIZE: tuple count of the YCSB table
 //#define SYNTH_TABLE_SIZE 100
 #define SYNTH_TABLE_SIZE 			10000000
@@ -156,22 +156,31 @@
 #define READ_ONLY_OPTIMIZATION_ENABLE false
 
 //REQ_PER_QUERY: request count of a txn (short/normal transaction in YCSB)
-#define REQ_PER_QUERY				16
+#define REQ_PER_QUERY				10
 #define LONG_TXN_RATIO              0
-#define LONG_TXN_READ_RATIO			1
+#define LONG_TXN_READ_RATIO			0
 #define FIELD_PER_TUPLE				10
 // ==== [YCSB-synthetic] ====
 #define SYNTHETIC_YCSB              true
 #define POS_HS                      RANDOM
-#define SPECIFIED_RATIO             1
+#define SPECIFIED_RATIO             0
 #define FLIP_RATIO                  0
-#define NUM_HS                      1
+#define NUM_HS                     4
 #define FIRST_HS                    WR
 #define SECOND_HS                   WR
-#define FIXED_HS                    0
+#define FIXED_HS                    false
 // Different ratio of operation type for hotspot
 #define READ_HOTSPOT_RATIO          0
-#define WRITE_HOTSPOT_RATIO         1
+#define WRITE_HOTSPOT_RATIO         0.5
+//11(top25%),12(midd25%),13(low25%);   21(dis<10%),22(dis<50%),23(dis>80%);   31(sequen);  41(sequen);  101(sequen);
+//111(random 1hotspot);   211(random 2hotspot);   311(random 3hotspot);  411(random 3hotspot);  1011(random 10hotspot);
+#define FIXED_HS_POS                          23
+#define HS_ACCESS                             0.5
+#define TEST_BB_ABORT                         false
+#define TEST_BB_ABORT_THREADS_1_HOT           2
+#define TEST_BB_ABORT_REQ_PER_QUERY_SHORT           8
+#define TEST_BB_ABORT_REQ_PER_QUERY_LONG            32
+#define RENEW_BB                                    false
 
 // ==== [TPCC] ====
 // For large warehouse count, the tables do not fit in memory
@@ -185,12 +194,13 @@
 #define NUM_WH 						1
 //
 enum TPCCTxnType {
-  TPCC_PAYMENT,
-  TPCC_NEW_ORDER,
-  TPCC_DELIVERY,
-  TPCC_ORDER_STATUS,
-  TPCC_STOCK_LEVEL,
-  TPCC_ALL};
+    TPCC_PAYMENT,
+    TPCC_NEW_ORDER,
+    TPCC_DELIVERY,
+    TPCC_ORDER_STATUS,
+    TPCC_STOCK_LEVEL,
+    TPCC_QUERY2,
+    TPCC_ALL};
 extern TPCCTxnType 					g_tpcc_txn_type;
 
 //#define TXN_TYPE					TPCC_ALL
@@ -205,7 +215,7 @@ extern TPCCTxnType 					g_tpcc_txn_type;
 
 #define DIST_PER_WARE				10
 // enable user-initiated aborts in new-order txn according to TPC-C doc.
-#define TPCC_USER_ABORT             true
+#define TPCC_USER_ABORT             false
 
 // Optimizations used in IC3
 #define COMMUTATIVE_OPS          false
@@ -225,8 +235,8 @@ extern TPCCTxnType 					g_tpcc_txn_type;
 /***********************************************/
 #define TEST_ALL					true
 enum TestCases {
-  READ_WRITE,
-  CONFLICT
+    READ_WRITE,
+    CONFLICT
 };
 extern TestCases					g_test_case;
 
@@ -250,9 +260,9 @@ extern TestCases					g_test_case;
 // PROFILING
 /***********************************************/
 #define PF_BASIC true
-#define PF_CS false
+#define PF_CS true
 #define PF_ABORT false
-#define PF_MODEL          false
+#define PF_MODEL          true
 
 /***********************************************/
 // Constant
@@ -283,7 +293,7 @@ extern TestCases					g_test_case;
 #define WOUND_WAIT                  12
 #define BAMBOO                      13
 #define IC3                         14
-#define HOTSPOT_FRIENDLY                        15
+#define HOTSPOT_FRIENDLY            15
 //Isolation Levels
 #define SERIALIZABLE				1
 #define SNAPSHOT					2
@@ -303,14 +313,47 @@ extern TestCases					g_test_case;
 
 #define TEST_NUM                    2
 #define TEST_INDEX                  3
+#define TEST_TARGET                 begin2W1
+
+#define RANDOM_READ_SYNTHETIC_YCSB    false
+
+#define  threads1W                    1
+#define  txnsize1W                    2
+#define  position1W                   3
+#define  begin2W1                      4
+#define  end2W1                        5
+#define  random2W                      6
+#define  random2W1R1W                  7
+#define  ycsbzif                       8
+#define  ycsbthreads                   9
+#define  ycsbratios                    10
+#define  tpccthreads                   11
+#define  tpccwhouses                   12
+#define  random3W                      13
+#define  random3WXR                    14
+#define  random3WYR                    15
+#define  tpccthreads2                   16
+#define  tpccwhouses2                   17
+#define  tpccthreads2q                   18
+#define  tpccwhouses2q                   19
+
+#define PERC_QUERY2  				false
 
 #define ABORT_OPTIMIZATION          true
 
-#define DEADLOCK_DETECTION          true
-#define HOTSPOT_FRIENDLY_TIMEOUT                false
+#define DEADLOCK_DETECTION          false
+#define HOTSPOT_FRIENDLY_TIMEOUT    false
 #define ABORT_WAIT_TIME             0.4
 
+#define WOUND_RENEW                 true
+
 #define VERSION_CHAIN_CONTROL       false
+
+#define USE_BLOOM_FILTER            false
+#define TEST_BAMBOO                 false
+
+#define NO_DEFER                    true
+#define NO_DIRTY                    true
 
 //#define MAX_CHAIN_LENGTH            18
 

@@ -3,7 +3,11 @@
 #include "global.h"
 #include "bloom_filter.h"
 #include <unordered_map>
-#include "tbb/tbb.h"
+#include <unordered_set>
+#include "manager.h"
+#include "row.h"
+//#include <unordered_set>
+//#include "tbb/tbb.h"
 
 class workload;
 class thread_t;
@@ -16,9 +20,11 @@ class txn_man;
 struct LockEntry;
 #elif CC_ALG == BAMBOO
 struct BBLockEntry;
+#elif CC_ALG == HOTSPOT_FRIENDLY
+struct Version;
 #endif
 
-// each thread has a txn_man. 
+// each thread has a txn_man.
 // a txn_man corresponds to a single transaction.
 
 //For VLL
@@ -26,7 +32,7 @@ enum TxnType {VLL_Blocked, VLL_Free};
 
 
 class Access {
-  public:
+public:
     access_t 	type;       // operation type
     row_t * 	data;       // real data of this tuple version[In write operation, it records the new data]
 
@@ -74,18 +80,39 @@ struct TxnEntry {
 
 class txn_man
 {
-  public:
+public:
     // **************************************
     // General Data Fields
     // **************************************
     // update per txn
 #if LATCH == LH_MCSLOCK
     mcslock::mcs_node * mcs_node;
+#elif LATCH == LH_MUTEX
+    pthread_mutex_t * latch;
+#else
 #endif
+
     thread_t *          h_thd;
     workload *          h_wl;
     txnid_t 		    txn_id;
     uint64_t            abort_cnt;          // Actually this attribute is useless because no one accesses it.
+
+#if TEST_BB_ABORT
+    //for test
+    std::vector<std::pair<uint64_t,bool>> txn_hotspot_set;
+    std::unordered_map<uint64_t, std::vector<uint64_t> *> *graph_ ;
+    struct dep_element2{
+        txn_man* dep_txn;
+        uint64_t dep_txn_id;             // the txn_id of retire_txn, used in writing phase to avoid wrong semaphore--
+        DepType dep_type;
+    };
+    typedef  tbb::concurrent_vector<dep_element2> Dependency;
+    Dependency          bb_dependency;
+    void PushDependency(txn_man *dep_txn, uint64_t dep_txn_id,DepType depType) {
+        dep_element2 temp_element = {dep_txn,dep_txn_id,depType};
+        bb_dependency.push_back(temp_element);
+    }
+#endif
 
     // update per request
     row_t * volatile    cur_row;
@@ -106,13 +133,12 @@ class txn_man
     bool volatile       lock_ready;
     bool volatile       lock_abort;         // forces another waiting txn to abort.
     status_t volatile   status;         // RUNNING, COMMITED, ABORTED, HOLDING
-    #if PF_ABORT
+#if PF_ABORT
     uint64_t            abort_chain;
-    uint8_t             padding0[64 - sizeof(bool)*2 - sizeof(status_t)-
-    sizeof(uint64_t)];
-    #else
+    uint8_t             padding0[64 - sizeof(bool)*2 - sizeof(status_t)- sizeof(uint64_t)];
+#else
     uint8_t             padding0[64 - sizeof(bool)*2 - sizeof(status_t)];
-    #endif
+#endif
     // ideal second cache line
 
     // [BAMBOO]
@@ -153,10 +179,14 @@ class txn_man
         DepType dep_type;
     };
     typedef  tbb::concurrent_vector<dep_element> Dependency;
-    uint64_t            hotspot_friendly_txn_id;
-    uint64_t            hotspot_friendly_serial_id;
-    uint64_t            hotspot_friendly_semaphore;
-
+    uint64_t               hotspot_friendly_txn_id = 0;
+    uint64_t               hotspot_friendly_serial_id;
+    uint64_t volatile      hotspot_friendly_semaphore;
+    bool volatile          ready_abort;
+    tbb::concurrent_unordered_map<txn_man*, DepType> i_dependency_on;
+    bool volatile          has_conflict;
+//    uint64_t               wound_txn_id;
+//    std::unordered_map<uint64_t, std::vector<uint64_t> *> *graph_ ;
 #if READ_ONLY_OPTIMIZATION_ENABLE
     // Optimization for read_only long transaction.
     bool                is_long;
@@ -168,9 +198,13 @@ class txn_man
     double            priority;           // Only the transaction itself can update the priority, so we can simply declare it a uint64_t.
 #endif
 
-    Dependency          hotspot_friendly_dependency;
+    Dependency          *hotspot_friendly_dependency;
 #if DEADLOCK_DETECTION
+#if USE_BLOOM_FILTER
     bloom_filter        hotspot_friendly_waiting_set;           // Deadlock Detection
+#else
+    tbb::concurrent_unordered_set<uint64_t>  hotspot_friendly_waiting_set;
+#endif
 #endif
     volatile bool       status_latch;
 
@@ -204,8 +238,7 @@ class txn_man
     // **************************************
     // General Main Functions
     // **************************************
-    virtual void        init(thread_t * h_thd, workload * h_wl, uint64_t
-    part_id);
+    virtual void        init(thread_t * h_thd, workload * h_wl, uint64_t  part_id);
     void                release();
     virtual RC 		    run_txn(base_query * m_query) = 0;
     RC 			        finish(RC rc);
@@ -236,9 +269,10 @@ class txn_man
     // [WW, BAMBOO]
     // if already abort, no change, return aborted
     // if already commit, no change, return committed
-    // if running, set abort, return aborted.  
-    status_t   set_abort(bool cascading=false) {
-      #if CC_ALG == BAMBOO
+    // if running, set abort, return aborted.
+    // 1:exec deadlock check abort,  2:exec deadlock check abort,  3:valid deadlock check abort, 4:valid rw abort, 5:valid cascading abort
+    status_t   set_abort(uint32_t cascading=0) {
+#if CC_ALG == BAMBOO
         uint64_t local = commit_barriers;
         uint64_t barriers = local >> 2;
         uint64_t s = local & 3UL;
@@ -250,7 +284,8 @@ class txn_man
             local = commit_barriers;
             barriers = local >> 2;
             s = local & 3UL;
-        } 
+            assert(s == ABORTED);
+        }
         if (s == ABORTED) {
             if (!lock_abort)
                 lock_abort = true;
@@ -265,28 +300,28 @@ class txn_man
             assert(false);
             return COMMITED;
         }
-      #elif CC_ALG == WOUND_WAIT || CC_ALG == IC3
-       if (ATOM_CAS(status, RUNNING, ABORTED)) {
+#elif CC_ALG == WOUND_WAIT || CC_ALG == IC3
+        if (ATOM_CAS(status, RUNNING, ABORTED)) {
             lock_abort = true;
             return ABORTED;
        }
        return status;       // COMMITED or ABORTED
-      #elif CC_ALG == HOTSPOT_FRIENDLY
+#elif CC_ALG == HOTSPOT_FRIENDLY
         if(status == ABORTED){
             return ABORTED;
         }
-        else if(status == RUNNING){
-            if(ATOM_CAS(status, RUNNING, ABORTED))
-                return RUNNING;          // COMMITED or ABORTED
-            else
-                return status;
+        else if(status == RUNNING ){
+//            INC_STATS(this->get_thd_id(), find_circle_abort, 1);
+            ATOM_CAS(status, RUNNING, ABORTED);
+            assert(status == ABORTED);
+            return status;
         }
         else{           // Possible: mis-kill
             return status;
         }
-      #else
+#else
         return ABORTED;
-      #endif
+#endif
     }
 
     status_t            wound_txn(txn_man * txn);
@@ -326,16 +361,21 @@ class txn_man
     RC				    validate_silo();
 #elif CC_ALG == HOTSPOT_FRIENDLY
     RC                  validate_hotspot_friendly(RC rc);
-    void                abort_process(txn_man * txn);
+    void                abort_process(txn_man * txn );
 
     inline uint64_t 	get_hotspot_friendly_txn_id(){return this->hotspot_friendly_txn_id;}
 
     void PushDependency(txn_man *dep_txn, uint64_t dep_txn_id,DepType depType) {
         dep_element temp_element = {dep_txn,dep_txn_id,depType};
-        hotspot_friendly_dependency.push_back(temp_element);
+        hotspot_friendly_dependency->push_back(temp_element);
+    }
+
+    void insert_i_dependency_on(txn_man *dep_txn, DepType depType){
+        i_dependency_on.insert(std::make_pair(dep_txn, depType));
     }
 
 #if DEADLOCK_DETECTION
+#if USE_BLOOM_FILTER
     /* Helper Functions for waiting_set */
     // Record a txn in waiting_set
     void InsertWaitingSet(uint64_t txn_id) {
@@ -346,10 +386,9 @@ class txn_man
     bool WaitingSetContains(uint64_t txn_id) {
         return hotspot_friendly_waiting_set.contains(txn_id);
     }
-
     // Update waiting_set
     // This should be a recursive call. Or there may be a deadlock.
-    void UnionWaitingSet(const bloom_filter& wait_set){
+    void UnionWaitingSet(const bloom_filter& wait_set) {
         hotspot_friendly_waiting_set |= wait_set;
 
         for (auto &dep_pair: hotspot_friendly_dependency) {
@@ -368,10 +407,44 @@ class txn_man
             }
         }
     }
+#else
+    void InsertWaitingSet(uint64_t txn_id) {
+        hotspot_friendly_waiting_set.insert(txn_id);
+    }
+
+    // Judge whether an element is in waiting_set
+    bool WaitingSetContains(uint64_t txn_id) {
+        auto itr = hotspot_friendly_waiting_set.find(txn_id);
+        if (itr != hotspot_friendly_waiting_set.cend() ) {
+            return true;
+        }else {
+            return false;
+        }
+    }
+    void UnionWaitingSet(const tbb::concurrent_unordered_set<uint64_t> wait_set){
+        hotspot_friendly_waiting_set.insert(wait_set.cbegin(), wait_set.cend());
+
+        for (auto &dep_pair: hotspot_friendly_dependency) {
+            if (!dep_pair.dep_type) {                    // we may get an element before it being initialized(empty data / wrong data)
+                break;
+            }
+            assert(dep_pair.dep_type != READ_WRITE_);
+
+            // There's already a deadlock.
+            if (WaitingSetContains(dep_pair.dep_txn->hotspot_friendly_txn_id) && dep_pair.dep_txn->status == RUNNING) {
+                set_abort();
+            }else {
+                if (dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id && dep_pair.dep_txn->status == RUNNING) {           // Don't inform the txn_manager who is already running a new txn.
+                    dep_pair.dep_txn->UnionWaitingSet(hotspot_friendly_waiting_set);
+                }
+            }
+        }
+    }
+#endif
 #endif
 
     void SemaphoreAddOne() {
-        ATOM_ADD(hotspot_friendly_semaphore, 1);
+        ATOM_ADD(hotspot_friendly_semaphore,1);
     }
 
     void SemaphoreSubOne() {
@@ -381,27 +454,27 @@ class txn_man
         else {
             auto new_val = ATOM_SUB_FETCH(hotspot_friendly_semaphore,1);
             if(new_val == UINT64_MAX) {
-                ATOM_ADD(hotspot_friendly_semaphore, 1);
+                hotspot_friendly_semaphore = 0;
             }
         }
     }
 
-    #if VERSION_CHAIN_CONTROL
-        // Restrict the length of version chain.
+#if VERSION_CHAIN_CONTROL
+    // Restrict the length of version chain.
         void PriorityAddOne() {
             priority ++;
         }
-    #endif
+#endif
 #endif
 
-  protected:
+protected:
     void 			    insert_row(row_t * row, table_t * table);
     void                index_insert(row_t * row, INDEX * index, idx_key_t key);
 
-  private:
-    #if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
+private:
+#if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
     void                assign_lock_entry(Access * access);
-    #endif
+#endif
 
 };
 

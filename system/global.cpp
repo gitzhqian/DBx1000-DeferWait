@@ -17,7 +17,7 @@ Plock part_lock_man;
 OptCC occ_man;
 #if CC_ALG == VLL
 VLLMan vll_man;
-#endif 
+#endif
 
 bool volatile warmup_finish = false;
 bool volatile enable_thread_mem_pool = false;
@@ -64,20 +64,119 @@ double g_perc_payment = PERC_PAYMENT;
 double g_perc_delivery = PERC_DELIVERY;
 double g_perc_orderstatus = PERC_ORDERSTATUS;
 double g_perc_stocklevel = PERC_STOCKLEVEL;
-double g_perc_neworder = 1 - (g_perc_payment + g_perc_delivery + g_perc_orderstatus + g_perc_stocklevel);
+double g_perc_neworder = 1 - (g_perc_payment + g_perc_delivery + g_perc_orderstatus + g_perc_stocklevel );
 bool g_wh_update = WH_UPDATE;
 
 //4-3 Restrict the length of version chain.[Unused]
 //uint64_t version_chain_threshold = MAX_CHAIN_LENGTH;
 
-char * output_file = NULL;
+// char * output_file = NULL;
+
+
+#if CC_ALG == WOUND_WAIT
+string cc_name = "WW";
+#elif CC_ALG == NO_WAIT
+string cc_name = "NW";
+#elif CC_ALG == WAIT_DIE
+string cc_name = "WD";
+#elif CC_ALG == BAMBOO
+string cc_name = "BB";
+#elif CC_ALG == SILO
+string cc_name = "SL";
+#elif CC_ALG == TICTOC
+string cc_name = "TT";
+#elif CC_ALG == HEKATON
+string cc_name = "HK";
+#elif CC_ALG == HOTSPOT_FRIENDLY
+string cc_name = "HF";
+#endif
+
+
+#if TEST_TARGET == threads1W
+string target = "1Wthreads";
+#elif TEST_TARGET == txnsize1W
+string target = "1Wtxnsize";
+#elif TEST_TARGET == position1W
+string target = "1Wposition";
+#elif TEST_TARGET == begin2W1
+string target = "2W1begin";
+#elif TEST_TARGET == end2W1
+string target = "2W1end";
+#elif TEST_TARGET == random2W
+string target = "2Wrandom";
+#elif TEST_TARGET == random2W1R1W
+string target = "2W1R1Wrandom";
+#elif TEST_TARGET == ycsbzif
+string target = "ycsbzif";
+#elif TEST_TARGET == ycsbthreads
+string target = "ycsbthreads";
+#elif TEST_TARGET == ycsbratios
+string target = "ycsbratios";
+#elif TEST_TARGET == tpccthreads
+string target = "tpccthreads";
+#elif TEST_TARGET == tpccwhouses
+string target = "tpccwhouses";
+#elif TEST_TARGET == random3W
+string target = "3Wrandom";
+#elif TEST_TARGET == random3WXR
+string target = "3WXRrandom";
+#elif TEST_TARGET == random3WYR
+string target = "3WYRrandom";
+#elif TEST_TARGET == tpccthreads2
+string target = "tpccthreads2";
+#elif TEST_TARGET == tpccwhouses2
+string target = "tpccwhouses2";
+#elif TEST_TARGET == tpccthreads2q
+string target = "tpccthreads2q";
+#elif TEST_TARGET == tpccwhouses2q
+string target = "tpccwhouses2q";
+#elif TEST_TARGET == tpccwhousesitm
+string target = "tpccwhousesitm";
+#elif TEST_TARGET == random4W
+string target = "4Wrandom";
+#endif
+
+
+#if TEST_NUM == 1
+string test_num = "1";
+#elif TEST_NUM == 2
+string test_num = "2";
+#elif TEST_NUM == 3
+string test_num = "3";
+#elif TEST_NUM == 4
+string test_num = "4";
+#endif
+
+#if TEST_INDEX == 1
+string test_index = "1";
+#elif TEST_INDEX == 2
+string test_index = "2";
+#elif TEST_INDEX == 3
+string test_index = "3";
+#elif TEST_INDEX == 4
+string test_index = "4";
+#elif TEST_INDEX == 5
+string test_index = "5";
+#endif
+
+//string temp ="/home/zhangqian/Hotspot-Friendly/test-paper/"+ cc_name + "/" + target + ".txt";
+//string temp_path= temp.c_str();
+//char * output_file = const_cast<char *>(temp.c_str());
+
+char * output_file = nullptr;
 
 map<string, string> g_params;
 
 #if TPCC_SMALL
 UInt32 g_max_items = 10000;
 UInt32 g_cust_per_dist = 2000;
-#else 
+#else
 UInt32 g_max_items = 100000;
 UInt32 g_cust_per_dist = 3000;
 #endif
+uint64_t g_max_orderline = uint64_t(1) << 32;
+
+
+std::atomic<uint64_t> wound_retire_count;
+std::atomic<uint64_t> wound_owner_count;
+std::atomic<uint64_t> blind_kill_count;

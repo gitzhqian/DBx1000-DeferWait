@@ -15,6 +15,9 @@
 #include "row_mvcc.h"
 #include "mem_alloc.h"
 #include "query.h"
+#include "thread"
+#include "row_hotspot_friendly.h"
+
 void ycsb_txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
     txn_man::init(h_thd, h_wl, thd_id);
     _wl = (ycsb_wl *) h_wl;
@@ -36,8 +39,9 @@ RC ycsb_txn_man::run_txn(base_query * query) {
     // 2-27 Optimization for read_only long transaction.
 #if CC_ALG == HOTSPOT_FRIENDLY && READ_ONLY_OPTIMIZATION_ENABLE
     is_long = m_query->is_long;
-    if(m_query->local_read_perc == 1)
+    if(m_query->local_read_perc == 1){
         read_only = true;
+    }
 #endif
 
 
@@ -48,11 +52,23 @@ RC ycsb_txn_man::run_txn(base_query * query) {
         DEC_STATS(h_thd->get_thd_id(), run_time, get_sys_clock() - starttime);
     }
 
-    for (uint32_t rid = 0; rid < m_query->request_cnt; rid ++) {
+#if TEST_BB_ABORT
+    txn_hotspot_set.clear();
+    auto query_hots = m_query->hotspot_set;
+    for (int i = 0; i < query_hots.size(); ++i) {
+        txn_hotspot_set.push_back(std::make_pair(query_hots[i].first,query_hots[i].second));
+    }
+    if (txn_hotspot_set.size() ==1){
+        m_query->request_cnt = 3;
+    }
+#endif
 
+    for (uint32_t rid = 0; rid < m_query->request_cnt; rid ++) {
 #if CC_ALG == HOTSPOT_FRIENDLY
         // HOTSPOT_FRIENDLY: Abort txn actively(before executing next operation)
-        if(this->status == ABORTED){
+        if(this->status == ABORTED ){
+//            printf("ycsb executing rc: %d. \n",rc);
+//            INC_STATS(this->get_thd_id(), find_circle_abort, 1);
             rc = Abort;
             goto final;
         }
@@ -62,6 +78,7 @@ RC ycsb_txn_man::run_txn(base_query * query) {
         int part_id = wl->key_to_part( req->key );
         bool finish_req = false;
         UInt32 iteration = 0;
+
         while ( !finish_req ) {
             if (iteration == 0) {
                 m_item = index_read(_wl->the_index, req->key, part_id);
@@ -71,13 +88,13 @@ RC ycsb_txn_man::run_txn(base_query * query) {
 //                    break;
             }
 
-            #if INDEX_STRUCT == IDX_BTREE
-                else {
+#if INDEX_STRUCT == IDX_BTREE
+            else {
                     _wl->the_index->index_next(get_thd_id(), m_item);
                     if (m_item == NULL)
                         break;
                 }
-            #endif
+#endif
 
             row_t * row = ((row_t *)m_item->location);
             row_t * row_local;
@@ -85,6 +102,7 @@ RC ycsb_txn_man::run_txn(base_query * query) {
             //printf("[txn-%lu] start %d requests at key %lu\n", get_txn_id(), rid, req->key);
             row_local = get_row(row, type);         // Call txn_man::get_row()
             if (row_local == NULL) {                // NULL: means the access fails
+//                printf("error. \n");
                 rc = Abort;
                 goto final;
             }
@@ -97,32 +115,32 @@ RC ycsb_txn_man::run_txn(base_query * query) {
             if (m_query->request_cnt > 1) {
                 if (req->rtype == RD || req->rtype == SCAN) {
 //                  for (int fid = 0; fid < schema->get_field_cnt(); fid++) {
-                        int fid = 0;
-                        char * data = row_local->get_data();
-                        __attribute__((unused)) uint64_t fval = *(uint64_t *)(&data[fid * 10]);
+                    int fid = 0;
+                    char * data = row_local->get_data();
+                    __attribute__((unused)) uint64_t fval = *(uint64_t *)(&data[fid * 10]);
 //                  }
                 } else {
                     assert(req->rtype == WR);
 //					for (int fid = 0; fid < schema->get_field_cnt(); fid++) {
-                        int fid = 0;
+                    int fid = 0;
 
-                        /*
-                         * [BUG in DBx1000]: Transaction should modify the ""row_local"" returned by get_row(), which is a new version in Hekaton and a local data copy in Silo and TicToc.
-                         * We shouldn't modify the "row" because it's the tuple that is visible to other transactions.
-                         * However, since "row_t" only stores the value, if we really modify "row", it won't affect the correctness of CC, because CC only uses locks and accesses.
-                         */
+                    /*
+                     * [BUG in DBx1000]: Transaction should modify the ""row_local"" returned by get_row(), which is a new version in Hekaton and a local data copy in Silo and TicToc.
+                     * We shouldn't modify the "row" because it's the tuple that is visible to other transactions.
+                     * However, since "row_t" only stores the value, if we really modify "row", it won't affect the correctness of CC, because CC only uses locks and accesses.
+                     */
 //#if (CC_ALG == BAMBOO) || (CC_ALG == WOUND_WAIT)
-                        char * data = row_local->get_data();
+                    char * data = row_local->get_data();
 //#else
 //                        char * data = row->get_data();
 //#endif
-                        /*
-                         * Note that the expression "&data[fid * 10]" is used to access the memory address of the "fid"th element in the "data" array, where each element is assumed to be 10 bytes in size.
-                         * The "(uint64_t *)" typecast is used to interpret this memory address as a pointer to an unsigned 64-bit integer, which is then dereferenced and assigned the value 0.
-                         * This effectively sets the 8 bytes starting from the "fid"th position in the "data" array to 0.
-                         */
-                        // The real modification of an update operation.
-                        *(uint64_t *)(&data[fid * 10]) = 0;
+                    /*
+                     * Note that the expression "&data[fid * 10]" is used to access the memory address of the "fid"th element in the "data" array, where each element is assumed to be 10 bytes in size.
+                     * The "(uint64_t *)" typecast is used to interpret this memory address as a pointer to an unsigned 64-bit integer, which is then dereferenced and assigned the value 0.
+                     * This effectively sets the 8 bytes starting from the "fid"th position in the "data" array to 0.
+                     */
+                    // The real modification of an update operation.
+                    *(uint64_t *)(&data[fid * 10]) = 0;
 //					}
                 }
             }
@@ -132,18 +150,33 @@ RC ycsb_txn_man::run_txn(base_query * query) {
             if (req->rtype == RD || req->rtype == WR || iteration == req->scan_len)
                 finish_req = true;
 
-            #if (CC_ALG == BAMBOO) && (THREAD_CNT != 1)
-                // retire write txn
+#if (CC_ALG == BAMBOO) && (THREAD_CNT != 1)
+            // retire write txn
                 if (finish_req && (req->rtype == WR) && (rid <= retire_threshold)) {
                     //printf("[txn-%lu] retire %d requests\n", get_txn_id(), rid);
                     if (retire_row(access_id) == Abort)
                       return finish(Abort);
                 }
-            #endif
+#endif
         }
     }
+
     rc = RCOK;
-final:
+    final:
+
+#if CC_ALG == HOTSPOT_FRIENDLY
+    if (rc == RCOK){
+//        printf("ycsb final rc: %d. \n",rc);
+        auto ret = ATOM_CAS(status, RUNNING, validating);
+        assert(ret);
+    }
+    if (rc == Abort) {
+        auto ret = ATOM_CAS(status, RUNNING, ABORTED);
+        assert(ret);
+
+    }
+#endif
+
     rc = finish(rc);
     return rc;
 }

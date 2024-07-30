@@ -1,5 +1,5 @@
 #include "txn.h"
-#include "row.h"
+
 #include "wl.h"
 #include "ycsb.h"
 #include "thread.h"
@@ -40,7 +40,13 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
     hotspot_friendly_semaphore = 0;
     hotspot_friendly_serial_id = 0;
     status_latch = false;
-
+    has_conflict = false;
+    hotspot_friendly_dependency = new Dependency();
+//    graph_ = new std::unordered_map<uint64_t, std::vector<uint64_t> *> ();
+//    for (uint32_t i = 0; i < g_thread_cnt; i++) {
+//        auto dependency_vec= new std::vector<uint64_t>;
+//        graph_->insert(std::make_pair(uint64_t(i), dependency_vec));
+//    }
 #if DEADLOCK_DETECTION
     bloom_parameters parameters;
     parameters.projected_element_count = 5;
@@ -64,6 +70,14 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
 
 #endif
 
+#if TEST_BB_ABORT
+    graph_ = new std::unordered_map<uint64_t, std::vector<uint64_t> *> ();
+    for (uint32_t i = 0; i < g_thread_cnt; i++) {
+        auto dependency_vec= new std::vector<uint64_t>;
+        graph_->insert(std::make_pair(uint64_t(i), dependency_vec));
+    }
+#endif
+
     num_accesses_alloc = 0;
 
 #if CC_ALG == TICTOC || CC_ALG == SILO
@@ -82,7 +96,7 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
 #elif CC_ALG == SILO
     _cur_tid = 0;
 #elif CC_ALG == IC3
-  depqueue = (TxnEntry **) _mm_malloc(sizeof(void *)*THREAD_CNT, 64);
+    depqueue = (TxnEntry **) _mm_malloc(sizeof(void *)*THREAD_CNT, 64);
   for (int i = 0; i < THREAD_CNT; i++)
     depqueue[i] = NULL;
   depqueue_sz = 0;
@@ -151,12 +165,36 @@ ts_t txn_man::get_ts() {
 }
 
 void txn_man::cleanup(RC rc) {
+#if TEST_BB_ABORT
+    if (!bb_dependency.empty()){
+        bb_dependency.clear();
+    }
+    for (auto itr = graph_->begin(); itr != graph_->end(); ++itr) {
+        std::vector<uint64_t>* vec = itr->second;
+        vec->clear();
+    }
+#endif
+
 #if CC_ALG == HOTSPOT_FRIENDLY
     hotspot_friendly_txn_id = 0;
     hotspot_friendly_serial_id = 0;
     hotspot_friendly_semaphore = 0;
 
-    hotspot_friendly_dependency.clear();
+    if (!hotspot_friendly_dependency->empty()){
+        hotspot_friendly_dependency->clear();
+    }
+    if (!i_dependency_on.empty()){
+        i_dependency_on.clear();
+    }
+
+//    for (auto itr = graph_->begin(); itr != graph_->end(); ++itr) {
+//        std::vector<uint64_t>* vec = itr->second;
+//        vec->clear();
+//    }
+
+    ready_abort = false;
+    has_conflict = false;
+//    wound_txn_id = 0;
 
 #if DEADLOCK_DETECTION
     hotspot_friendly_waiting_set.clear();
@@ -283,13 +321,18 @@ void txn_man::cleanup(RC rc) {
 #endif
 }
 
-
 #if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
 inline
 void txn_man::assign_lock_entry(Access * access) {
 #if CC_ALG == BAMBOO
+#if PF_MODEL
+    uint64_t starttime  = get_sys_clock();
+#endif
     auto lock_entry = (BBLockEntry *) _mm_malloc(sizeof(BBLockEntry), 64);
     new (lock_entry) BBLockEntry(this, access);
+#if PF_MODEL
+    INC_STATS(this->get_thd_id(), time_creat_version, get_sys_clock() - starttime);
+#endif
 #else
     auto lock_entry = (LockEntry *) _mm_malloc(sizeof(LockEntry), 64);
     new (lock_entry) LockEntry(this, access);
@@ -320,34 +363,34 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
         assert(row_cnt < MAX_ROW_PER_TXN);
         Access *access = (Access *) _mm_malloc(sizeof(Access), 64);
 
-        #if COMMUTATIVE_OPS
-                // init
+#if COMMUTATIVE_OPS
+        // init
                 access->com_op = COM_NONE;
-        #endif
+#endif
 
         accesses[row_cnt] = access;
 
-        #if (CC_ALG == SILO || CC_ALG == TICTOC)
-            access->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
+#if (CC_ALG == SILO || CC_ALG == TICTOC)
+        access->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
             access->data->init(MAX_TUPLE_SIZE);
             access->orig_data = (row_t *) _mm_malloc(sizeof(row_t), 64);
             access->orig_data->init(MAX_TUPLE_SIZE);
-        #elif (CC_ALG == IC3)
-            access->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
+#elif (CC_ALG == IC3)
+        access->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
             access->data->init(MAX_TUPLE_SIZE);
             #if IC3_FIELD_LOCKING
                 access->tids = (ts_t *) _mm_malloc(sizeof(ts_t) * MAX_FIELD_SIZE, 64);
             #else
                 access->tid = 0;
             #endif
-        #elif (CC_ALG == WOUND_WAIT)
-            // allocate lock entry as well
+#elif (CC_ALG == WOUND_WAIT)
+        // allocate lock entry as well
             assign_lock_entry(access);
             // for ww and bb, data is a local copy of original row for txn to work on
             access->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
             access->data->init(MAX_TUPLE_SIZE);
-        #elif (CC_ALG == BAMBOO)
-            // allocate lock entry as well
+#elif (CC_ALG == BAMBOO)
+        // allocate lock entry as well
             assign_lock_entry(access);
             // data is for making local changes before added to retired
             access->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
@@ -357,32 +400,32 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
             access->orig_data = (row_t *) _mm_malloc(sizeof(row_t), 64);
             access->orig_data->init(MAX_TUPLE_SIZE);
             access->orig_data->table = row->get_table();
-        #elif (CC_ALG == DL_DETECT || (CC_ALG == NO_WAIT) || (CC_ALG == WAIT_DIE))
-            // allocate lock entry as well
+#elif (CC_ALG == DL_DETECT || (CC_ALG == NO_WAIT) || (CC_ALG == WAIT_DIE))
+        // allocate lock entry as well
             assign_lock_entry(access);
             access->orig_data = (row_t *) _mm_malloc(sizeof(row_t), 64);
             access->orig_data->init(MAX_TUPLE_SIZE);
-        #endif
+#endif
 
-            num_accesses_alloc++;
+        num_accesses_alloc++;
     }
 
     /**
      *  Actually access the row.
      */
-    #if (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO)
-        rc = row->get_row(type, this, accesses[ row_cnt ]->orig_row, accesses[row_cnt]);
+#if (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO)
+    rc = row->get_row(type, this, accesses[ row_cnt ]->orig_row, accesses[row_cnt]);
         if (rc == Abort) {
             accesses[row_cnt]->orig_row = NULL;
             return NULL;
         }
-    #elif CC_ALG == DL_DETECT || (CC_ALG == NO_WAIT) || (CC_ALG == WAIT_DIE)
-        rc = row->get_row(type, this, accesses[ row_cnt ]->data, accesses[row_cnt]);
+#elif CC_ALG == DL_DETECT || (CC_ALG == NO_WAIT) || (CC_ALG == WAIT_DIE)
+    rc = row->get_row(type, this, accesses[ row_cnt ]->data, accesses[row_cnt]);
           if (rc == Abort)
             return NULL;
           accesses[row_cnt]->orig_row = row;
-    #elif CC_ALG == IC3
-        assert(rc == RCOK);
+#elif CC_ALG == IC3
+    assert(rc == RCOK);
         // re-initialize read/write sets for the tuple.
         accesses[row_cnt]->rd_accesses = 0;
         accesses[row_cnt]->wr_accesses = 0;
@@ -395,68 +438,83 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
         #if !IC3_FIELD_LOCKING
             row->get_row(type, this, row, accesses[row_cnt]);
         #endif
-    #elif CC_ALG == HOTSPOT_FRIENDLY                // Call get_row to actually access the row
-        rc = row->get_row(type, this, accesses[ row_cnt ]->data, accesses[ row_cnt ]);
-        accesses[row_cnt]->orig_row = row;
+#elif CC_ALG == HOTSPOT_FRIENDLY                // Call get_row to actually access the row
+    rc = row->get_row(type, this, accesses[ row_cnt ]->data, accesses[ row_cnt ]);
+    accesses[row_cnt]->orig_row = row;
 
-        if (rc == Abort) {
-            return NULL;
-        }
-        auto temp_version = (Version*) accesses[row_cnt]->tuple_version;
-        temp_version->data = row;
-    #else
-      rc = row->get_row(type, this, accesses[ row_cnt ]->data, accesses[row_cnt]);
+    if (rc == Abort) {
+        return NULL;
+    }
+    auto temp_version = (Version*) accesses[row_cnt]->tuple_version;
+    temp_version->data = row;
+
+#else
+    rc = row->get_row(type, this, accesses[ row_cnt ]->data, accesses[row_cnt]);
       if (rc == Abort)
         return NULL;
       accesses[row_cnt]->orig_row = row;
-    #endif
+#endif
 
-    #if (CC_ALG == BAMBOO && BB_OPT_RAW)
-        if (rc == FINISH) {
+#if (CC_ALG == BAMBOO && BB_OPT_RAW)
+    if (rc == FINISH) {
             // RAW optimization
             accesses[row_cnt]->data->table = row->get_table();
         }
-    #endif
+#endif
 
     /**
      * Set the operation type of a certain access [row->get_row() successfully, so we can set access object directly]
      */
     accesses[row_cnt]->type = type;
 
-    #if CC_ALG == TICTOC
-        accesses[row_cnt]->wts = last_wts;
+#if CC_ALG == TICTOC
+    accesses[row_cnt]->wts = last_wts;
         accesses[row_cnt]->rts = last_rts;
-    #elif CC_ALG == SILO
-        accesses[row_cnt]->tid = last_tid;
-    #elif CC_ALG == HEKATON
-        accesses[row_cnt]->history_entry = history_entry;
-    #endif
+#elif CC_ALG == SILO
+    accesses[row_cnt]->tid = last_tid;
+#elif CC_ALG == HEKATON
+    accesses[row_cnt]->history_entry = history_entry;
+#endif
 
     /**
      * [type==WR]:
      */
     if (type == WR) {
-        #if CC_ALG == WOUND_WAIT
-            // make local copy to work on
+#if CC_ALG == WOUND_WAIT
+        // make local copy to work on
             accesses[row_cnt]->data->table = row->get_table();
             accesses[row_cnt]->data->copy(row);
-        #elif CC_ALG == BAMBOO
-            // make local copy to work on
-            accesses[row_cnt]->data->table = row->get_table();
-            accesses[row_cnt]->data->copy(row);
-            // make copy to rollback
-            accesses[row_cnt]->orig_data->table = row->get_table();
-            accesses[row_cnt]->orig_data->copy(row);
-        #elif ROLL_BACK && (CC_ALG == DL_DETECT || CC_ALG == NO_WAIT || CC_ALG == WAIT_DIE)
-            accesses[row_cnt]->orig_data->table = row->get_table();
-            accesses[row_cnt]->orig_data->copy(row);
+#elif CC_ALG == BAMBOO
+        #if PF_CS
+        uint64_t startt = get_sys_clock();
         #endif
+        // make local copy to work on
+        accesses[row_cnt]->data->table = row->get_table();
+        accesses[row_cnt]->data->copy(row);
+        // make copy to rollback
+        accesses[row_cnt]->orig_data->table = row->get_table();
+        accesses[row_cnt]->orig_data->copy(row);
+        #if PF_CS
+        INC_STATS(get_thd_id(), time_copy, get_sys_clock() - startt);
+        #endif
+#elif CC_ALG == HOTSPOT_FRIENDLY
+#if PF_CS
+        uint64_t startt = get_sys_clock();
+#endif
+        temp_version->data->copy(row);
+#if PF_CS
+        INC_STATS(get_thd_id(), time_copy, get_sys_clock() - startt);
+#endif
+#elif ROLL_BACK && (CC_ALG == DL_DETECT || CC_ALG == NO_WAIT || CC_ALG == WAIT_DIE)
+        accesses[row_cnt]->orig_data->table = row->get_table();
+            accesses[row_cnt]->orig_data->copy(row);
+#endif
     }
 
-    #if (CC_ALG == NO_WAIT || CC_ALG == DL_DETECT) && ISOLATION_LEVEL == REPEATABLE_READ
-        if (type == RD)
+#if (CC_ALG == NO_WAIT || CC_ALG == DL_DETECT) && ISOLATION_LEVEL == REPEATABLE_READ
+    if (type == RD)
             row->return_row(type, accesses[ row_cnt ]->data, accesses[row_cnt]->lock_entry);
-    #endif
+#endif
 
     /**
      * Update txn statistics
@@ -469,13 +527,13 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
     uint64_t timespan = get_sys_clock() - starttime;
     INC_TMP_STATS(get_thd_id(), time_man, timespan);
 
-    #if  (CC_ALG == WOUND_WAIT)
-        if (type == WR)
+#if  (CC_ALG == WOUND_WAIT)
+    if (type == WR)
             return accesses[row_cnt - 1]->data;
         else
             return accesses[row_cnt - 1]->orig_row;
-    #elif CC_ALG == BAMBOO
-        //printf("txn %lu got row %p at %d-th access %p\n", get_txn_id(), (void *)accesses[row_cnt - 1]->orig_row, row_cnt - 1, (void *)accesses[row_cnt - 1]);
+#elif CC_ALG == BAMBOO
+    //printf("txn %lu got row %p at %d-th access %p\n", get_txn_id(), (void *)accesses[row_cnt - 1]->orig_row, row_cnt - 1, (void *)accesses[row_cnt - 1]);
         if (type == WR)
             return accesses[row_cnt - 1]->data;
         else {
@@ -484,15 +542,15 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
             else
               return accesses[row_cnt - 1]->data; // RAW
         }
-    #elif CC_ALG == IC3
-        return accesses[row_cnt - 1]->data;
-    #elif CC_ALG == HOTSPOT_FRIENDLY
+#elif CC_ALG == IC3
+    return accesses[row_cnt - 1]->data;
+#elif CC_ALG == HOTSPOT_FRIENDLY
     auto res_version = (Version*) accesses[row_cnt - 1]->tuple_version;
     return res_version->data;
 
-    #else
-      return accesses[row_cnt - 1]->data;
-    #endif
+#else
+    return accesses[row_cnt - 1]->data;
+#endif
 }
 
 void txn_man::insert_row(row_t * row, table_t * table) {
@@ -555,12 +613,12 @@ RC txn_man::finish(RC rc) {
 #elif CC_ALG == TICTOC
     if (rc == RCOK)
 		rc = validate_tictoc();
-	else 
+	else
 		cleanup(rc);
 #elif CC_ALG == SILO
     if (rc == RCOK)
 		rc = validate_silo();
-	else 
+	else
 		cleanup(rc);
 #elif CC_ALG == IC3
     if (rc == RCOK) {
@@ -612,7 +670,7 @@ RC txn_man::finish(RC rc) {
                 }
         }
     }
-#if PF_BASIC 
+#if PF_BASIC
     INC_STATS(get_thd_id(), time_commit, get_sys_clock() - starttime);
 #endif
   }
@@ -642,10 +700,9 @@ void txn_man::release() {
         mem_allocator.free(accesses[i], 0);
     }
     mem_allocator.free(accesses, 0);
-
+#endif
 #if LATCH == LH_MCSLOCK
     delete mcs_node;
-#endif
 #endif
 }
 

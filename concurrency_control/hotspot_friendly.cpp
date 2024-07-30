@@ -6,16 +6,16 @@
 #include "row_hotspot_friendly.h"
 #include "manager.h"
 #include <mm_malloc.h>
+#include <unordered_set>
 
 
 #if CC_ALG == HOTSPOT_FRIENDLY
 
 RC txn_man::validate_hotspot_friendly(RC rc) {
-    uint64_t starttime = get_sys_clock();
-
     /**
      * Wait to validate. && Check deadlock again. || Abort myself.
      */
+#if DEADLOCK_DETECTION
     while(true){
         // Abort myself actively
         if(status == ABORTED || rc == Abort){
@@ -26,14 +26,12 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
             break;
         }
 
-#if DEADLOCK_DETECTION
         //[Check Deadlock again]: Make sure the workload can finish.
         for(auto & dep_pair : hotspot_friendly_dependency) {
             if(status == ABORTED){
                 abort_process(this);
                 return Abort;
             }
-
             if(!dep_pair.dep_type){               // we may get an element before it being initialized(empty data / wrong data)
                 break;
             }
@@ -47,10 +45,9 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
                 return Abort;
             }
         }
-#endif
 
 #if HOTSPOT_FRIENDLY_TIMEOUT
-//         [Timeout]: Make sure the workload can finish.[1 ms(a transaction's average execution time is 0.16ms)]
+        //         [Timeout]: Make sure the workload can finish.[1 ms(a transaction's average execution time is 0.16ms)]
         uint64_t span = get_sys_clock() - starttime;
         if(span > ABORT_WAIT_TIME*1000000UL){
             abort_process(this);
@@ -58,35 +55,113 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
         }
 #endif
     }
-
-
-    /**
-     * Update status.
-     */
-    if(status == ABORTED){
+#endif
+    /** * Update status. */
+    if(rc == Abort || status == ABORTED){
+//        printf("rc:%d. \n", rc);
         abort_process(this);
+
         return Abort;
     }
-    else if(status == RUNNING){
-        if(!ATOM_CAS(status, RUNNING, validating)) {
-            assert(status == ABORTED);
+
+#if PF_MODEL
+    uint64_t starttime = get_sys_clock();
+#endif
+    std::stack<std::pair<txn_man*, DepType>> dep_stack;
+    uint64_t cur_ts = get_ts();
+    for (auto it = i_dependency_on.begin(); it != i_dependency_on.end(); ++it) {
+        dep_stack.push(std::make_pair(it->first, it->second));
+    }
+    while(true) {
+        if(status == ABORTED){
             abort_process(this);
+
             return Abort;
         }
+        if (hotspot_friendly_semaphore == 0 ) {
+            break;
+        }
+
+        if (i_dependency_on.empty()) {
+            hotspot_friendly_semaphore = 0;
+            break;
+        } else {
+            for (auto & it : i_dependency_on) {
+                dep_stack.push(it);
+            }
+
+            while (!dep_stack.empty()) {
+                auto stk_top = dep_stack.top();
+                if (stk_top.first == nullptr){
+                    i_dependency_on.unsafe_erase(stk_top.first);
+                } else if (stk_top.first->ready_abort) {
+                    // already pass validating, some may not need to abort
+                    // because for write, i always append a new version, i have process it in commit
+                    if (stk_top.second == READ_WRITE_ || stk_top.second == WRITE_WRITE_){
+//                    if (stk_top.second == READ_WRITE_ ){
+                        auto its_ts = stk_top.first->get_ts();
+                        if ( its_ts > cur_ts){             // upgrade again
+                            cur_ts = its_ts +1;
+                            this->set_ts(cur_ts);
+                        }
+                        i_dependency_on.unsafe_erase(stk_top.first);
+                    } else{
+                        abort_process(this);
+#if PF_MODEL
+                        INC_STATS(get_thd_id(), find_circle_abort, 1);
+#endif
+                        return Abort;
+                    }
+                }
+                else if (stk_top.first->status > 1){       // already pass validating
+                    auto dep_txn = stk_top.first;
+                    auto dep_txn_deps = dep_txn->i_dependency_on;
+                    auto itr = dep_txn_deps.find(this);
+                    if (itr != dep_txn_deps.end() && itr->second == WRITE_READ_){
+                        abort_process(this);
+#if PF_MODEL
+                        INC_STATS( get_thd_id(), find_circle_abort, 1);
+#endif
+                        return Abort;
+                    } else{
+                        auto its_ts =  dep_txn->get_ts();
+                        if ( its_ts > cur_ts){             // upgrade again
+                            cur_ts = its_ts +1;
+                            this->set_ts(cur_ts);
+                        }
+                        COMPILER_BARRIER
+                        this->SemaphoreSubOne();
+                        COMPILER_BARRIER
+                        i_dependency_on.unsafe_erase(stk_top.first);
+                    }
+                }
+
+                dep_stack.pop();
+            }
+        }
+//        printf("hotspot_friendly_semaphore:%lu .\n", hotspot_friendly_semaphore);
     }
-    else {
-        assert(status == ABORTED);
-        abort_process(this);
-        return Abort;
+#if PF_MODEL
+    uint64_t endtime = get_sys_clock();
+    INC_STATS(this->get_thd_id(), time_verify, endtime - starttime);
+#endif
+
+    for(auto & dep_pair :*hotspot_friendly_dependency){
+        assert( dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id);
+        if (dep_pair.dep_txn != nullptr){
+            COMPILER_BARRIER
+            dep_pair.dep_txn->SemaphoreSubOne();
+            COMPILER_BARRIER
+            dep_pair.dep_type = INVALID; // Making concurrent_vector correct
+        }
     }
 
+    hotspot_friendly_dependency->clear();
 
-    /**
-     * Validate the read & write set
-     */
+#if DEADLOCK_DETECTION
+    /** * Validate the read & write set */
     uint64_t min_next_begin = UINT64_MAX;
     uint64_t serial_id = 0;
-
     // separate write set from accesses
     int write_set[wr_cnt];
     int cur_wr_idx = 0;
@@ -94,7 +169,6 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
     for(int rid = 0; rid < row_cnt; rid++){
         // Caculate serial_ID
         Version* current_version = (Version*)accesses[rid]->tuple_version;
-
         if(accesses[rid]->type == WR) {          // we record the new version in read_write_set
             current_version = current_version->next;
         }
@@ -104,7 +178,7 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
                 cout << hotspot_friendly_txn_id << " You should wait!  " << endl;
 
 #if DEADLOCK_DETECTION
-                //[DEADLOCK FIX]: Since we may subtract the semaphore of a txn too aggressively, the txn may be validated too early. So we have to do one more deadlock check here.
+//                [DEADLOCK FIX]: Since we may subtract the semaphore of a txn too aggressively, the txn may be validated too early. So we have to do one more deadlock check here.
                 for(auto & dep_pair : hotspot_friendly_dependency) {
                     if(!dep_pair.dep_type){               // we may get an element before it being initialized(empty data / wrong data)
                         break;
@@ -121,7 +195,6 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
                 }
 #endif
             }
-
             serial_id = current_version->begin_ts + 1;
             assert(serial_id > 0);
         }
@@ -131,48 +204,42 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
             continue;
         }
 
-        // Check RW dependency
+        // Check RW dependency, version type=read
         Version* newer_version = current_version->prev;
         if(newer_version){
-
             txn_man* newer_version_txn = newer_version->retire;
             // New version is uncommitted
             if(newer_version_txn){
-
                 while(!ATOM_CAS(newer_version_txn->status_latch, false, true)){
                     PAUSE
                 }
                 status_t temp_status = newer_version_txn->status;
-
                 if(temp_status == RUNNING){
                     if(newer_version->begin_ts != UINT64_MAX){
                         assert(newer_version->retire == nullptr);
-                        min_next_begin = std::min(min_next_begin,newer_version->begin_ts);
+                        min_next_begin = std::min(min_next_begin, newer_version->begin_ts);
                     }
                     else{
                         assert(newer_version->begin_ts == UINT64_MAX);
-
-                        // Record RW dependency
-
+//                        // Record RW dependency
                         newer_version_txn->SemaphoreAddOne();
-                        PushDependency(newer_version_txn,newer_version_txn->get_hotspot_friendly_txn_id(),DepType::READ_WRITE_);
-                        // Update waiting set [We don't have to do that, meaningless]
+                        PushDependency(newer_version_txn, newer_version_txn->get_hotspot_friendly_txn_id(),DepType::READ_WRITE_);
+//                        // Update waiting set [We don't have to do that, meaningless]
                     }
                 }
                 else if(temp_status == writing){
                     // newer_version->begin_ts may not be set, but newer_version_txn->hotspot_friendly_serial_id is already calculated.
-                    min_next_begin = std::min(min_next_begin,newer_version_txn->hotspot_friendly_serial_id);
+                    min_next_begin = std::min(min_next_begin, newer_version_txn->hotspot_friendly_serial_id);
                 }
                 else if(temp_status == committing || temp_status == COMMITED){
                     // Treat next tuple version as committed(Do nothing here)
                     assert(newer_version->begin_ts != UINT64_MAX);
-                    min_next_begin = std::min(min_next_begin,newer_version->begin_ts);
+                    min_next_begin = std::min(min_next_begin, newer_version->begin_ts);
                 }
                 else if(temp_status == validating){
                     newer_version_txn->status_latch = false;
                     abort_process(this);
                     return Abort;
-
                     //Todo: maybe we can wait until newer_version_txn commit/abort,but how can it inform me before that thread start next txn
                     /*
                     // abort in advance
@@ -187,10 +254,9 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
                     newer_version_txn->status_latch = false;
                     continue;
                 }
-
                 newer_version_txn->status_latch = false;
             }
-            // new version is committed
+                // new version is committed
             else{
                 min_next_begin = std::min(min_next_begin,newer_version->begin_ts);
             }
@@ -202,62 +268,108 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
             }
         }
     }
-
-
-    /**
-     * Writing phase
-     */
-    // hotspot_friendly_serial_id may be updated because of RW dependency.
-     this->hotspot_friendly_serial_id = max(this->hotspot_friendly_serial_id , serial_id);
-     assert(this->hotspot_friendly_serial_id != 0);
-
-     // Update status.
-     while(!ATOM_CAS(status_latch, false, true))
-         PAUSE
-
-     assert(status == validating);
-     ATOM_CAS(status, validating, writing);
-     status_latch = false;
-
-     for(int rid = 0; rid < wr_cnt; rid++){
-         while (!ATOM_CAS(accesses[write_set[rid]]->orig_row->manager->blatch, false, true)){
-             PAUSE
-         }
-
-         Version* new_version = (Version*)accesses[write_set[rid]]->tuple_version;
-         Version* old_version = new_version->next;
-
-         assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
-
-         assert(this->hotspot_friendly_serial_id > old_version->begin_ts);
-         old_version->end_ts = this->hotspot_friendly_serial_id;
-         new_version->begin_ts = this->hotspot_friendly_serial_id;
-         new_version->retire = nullptr;
-         new_version->retire_ID = 0;
-
-#if VERSION_CHAIN_CONTROL
-         //4-3 Restrict the length of version chain. [Subtract the count of uncommitted versions.]
-         accesses[write_set[rid]]->orig_row->manager->DecreaseThreshold();
 #endif
 
-         accesses[write_set[rid]]->orig_row->manager->blatch = false;
-     }
+    /*** Writing phase */
+    // hotspot_friendly_serial_id may be updated because of RW dependency.
+#if DEADLOCK_DETECTION
+    this->hotspot_friendly_serial_id = max(this->hotspot_friendly_serial_id , serial_id);
+#endif
 
+    this->hotspot_friendly_serial_id =  this->get_ts() ;
+    assert(this->hotspot_friendly_serial_id != 0);
 
-     /**
-      * Releasing Dependency
-      */
-     // Update status.
-     while(!ATOM_CAS(status_latch, false, true))
-         PAUSE
+    // Update status.
+//     while(!ATOM_CAS(status_latch, false, true))
+//         PAUSE
+//     assert(status == validating);
+    ATOM_CAS(status, validating, writing);
+//     assert(status == writing);
+//     status_latch = false;
 
-     assert(status == writing);
-     ATOM_CAS(status, writing, committing);
-     status_latch = false;
+#if DEADLOCK_DETECTION
+    for(int rid = 0; rid < wr_cnt; rid++){
+        while (!ATOM_CAS(accesses[write_set[rid]]->orig_row->manager->blatch, false, true)){
+            PAUSE
+        }
 
-     for(auto & dep_pair :hotspot_friendly_dependency){
+        Version* new_version = (Version*)accesses[write_set[rid]]->tuple_version;
+        Version* old_version = new_version->next;
+
+        assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
+
+        assert(this->hotspot_friendly_serial_id > old_version->begin_ts);
+        old_version->end_ts = this->hotspot_friendly_serial_id;
+        new_version->begin_ts = this->hotspot_friendly_serial_id;
+        new_version->retire = nullptr;
+        new_version->retire_ID = 0;
+
+#if VERSION_CHAIN_CONTROL
+        //4-3 Restrict the length of version chain. [Subtract the count of uncommitted versions.]
+         accesses[write_set[rid]]->orig_row->manager->DecreaseThreshold();
+#endif
+        accesses[write_set[rid]]->orig_row->manager->blatch = false;
+    }
+#endif
+
+#if PF_MODEL
+    uint64_t starttime_commit = get_sys_clock();
+#endif
+
+    for(int rid = 0; rid < row_cnt; rid++){
+        auto new_version = (Version*)accesses[rid]->tuple_version;
+        if (new_version->type == RD){
+//             ATOM_CAS(new_version->type, RD, XP) ;
+            new_version->type = XP;
+            new_version->retire = nullptr;
+            continue;
+        }
+
+        auto old_version = new_version->next;
+        assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
+        assert(this->hotspot_friendly_serial_id > old_version->begin_ts);
+
+#if NO_DIRTY
+        accesses[rid]->orig_row->manager->lock_row(this);
+#endif
+        if (old_version->type == AT){
+            while (true) {
+                if (old_version->type == XP){
+                    break;
+                }
+                old_version = old_version->next;
+            }
+        }
+
+        old_version->end_ts = this->hotspot_friendly_serial_id;
+        new_version->begin_ts = this->hotspot_friendly_serial_id;
+        new_version->retire = nullptr;
+        new_version->retire_ID = 0;
+        new_version->type = XP;
+#if NO_DIRTY
+        accesses[rid]->orig_row->manager->blatch = false;
+#else
+        accesses[rid]->orig_row->manager->unlock_row(this);
+#endif
+
+    }
+
+#if PF_MODEL
+    uint64_t endtime_commit = get_sys_clock();
+    INC_STATS(this->get_thd_id(), time_commit_processing, endtime_commit - starttime_commit);
+#endif
+
+    /*** Releasing Dependency */
+    // Update status.
+//     while(!ATOM_CAS(status_latch, false, true))
+//         PAUSE
+//     assert(status == writing);
+    ATOM_CAS(status, writing, committing);
+//     status_latch = false;
+
+#if DEADLOCK_DETECTION
+    for(auto & dep_pair :hotspot_friendly_dependency){
         if(dep_pair.dep_txn->status == RUNNING && dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id ){
-
             // if there is a RW dependency
             if(dep_pair.dep_type == READ_WRITE_){
                 uint64_t origin_serial_ID;
@@ -267,39 +379,48 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
                     new_serial_ID = this->hotspot_friendly_serial_id + 1;
                 } while (origin_serial_ID < new_serial_ID && !ATOM_CAS(dep_pair.dep_txn->hotspot_friendly_serial_id, origin_serial_ID, new_serial_ID));
             }
-
             dep_pair.dep_txn->SemaphoreSubOne();
         }
-
-         // Making concurrent_vector correct
-         dep_pair.dep_type = INVALID;
-     }
+        dep_pair.dep_type = INVALID; // Making concurrent_vector correct
+    }
+#endif
 
     // Update status.
-    while(!ATOM_CAS(status_latch, false, true))
-        PAUSE
-
-    assert(status == committing);
+//    while(!ATOM_CAS(status_latch, false, true))
+//        PAUSE
+//    assert(status == committing);
     ATOM_CAS(status, committing, COMMITED);
-    status_latch = false;
+//    status_latch = false;
+
+
 
     return rc;
 }
 
+void txn_man::abort_process(txn_man * txn ){
+//    while(!ATOM_CAS(status_latch, false, true))
+//        PAUSE
+//
+//    assert(status == RUNNING || status == ABORTED || status == validating);
+//    status = ABORTED;
+//    status_latch = false;
 
+    uint64_t starttime = get_sys_clock();
 
-void txn_man::abort_process(txn_man * txn){
-    while(!ATOM_CAS(status_latch, false, true))
-        PAUSE
-
-    assert(status == RUNNING || status == ABORTED || status == validating);
-    status = ABORTED;
-    status_latch = false;
+    if (status == RUNNING || status == validating){
+        status = ABORTED;
+    }
 
 #ifdef ABORT_OPTIMIZATION
     if(wr_cnt != 0){
         for(int rid = 0; rid < row_cnt; rid++){
+#if NO_DIRTY
+            accesses[rid]->orig_row->manager->blatch = false;
+#endif
+            Version* new_version = (Version*)accesses[rid]->tuple_version;
             if(accesses[rid]->type == RD){
+                new_version->type = AT;
+                new_version->retire = nullptr;
                 continue;
             }
 
@@ -309,59 +430,50 @@ void txn_man::abort_process(txn_man * txn){
 #endif
 
             // We record new version in read_write_set.
-            Version* new_version = (Version*)accesses[rid]->tuple_version;
             Version* old_version;
             Version* row_header;
-
             assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
-
             row_header = accesses[rid]->orig_row->manager->get_version_header();
             uint64_t vh_chain = (row_header->version_number & CHAIN_NUMBER) >> 40;
             uint64_t my_chain = ((new_version->version_number & CHAIN_NUMBER) >> 40) + 1;
             // [No Latch]: Free directly.
             if(vh_chain > my_chain){
                 assert(row_header->version_number > new_version->version_number);
-
                 new_version->retire = nullptr;
                 new_version->retire_ID = 0;
-
                 new_version->prev = NULL;
-                new_version->next = NULL;
-
+//                new_version->next = NULL;
+                new_version->type = AT;
                 //TODO: can we just free this object without reset retire and retire_ID?
-
-                _mm_free(new_version);
-                new_version = NULL;
+//                _mm_free(new_version);
+//                new_version = NULL;
             }
             else{       // In the same chain.
-                while (!ATOM_CAS(accesses[rid]->orig_row->manager->blatch, false, true)){
-                    PAUSE
-                }
+#if NO_DIRTY
+#else
+                accesses[rid]->orig_row->manager->lock_row(this);
+#endif
 
                 // update the version_header if there's a new header.
                 row_header = accesses[rid]->orig_row->manager->get_version_header();
                 vh_chain = (row_header->version_number & CHAIN_NUMBER) >> 40;
                 my_chain = ((new_version->version_number & CHAIN_NUMBER) >> 40);
-
                 assert(vh_chain >= my_chain);
-
                 // No longer in the same chain. [No Latch]: Free directly.
                 if(vh_chain != my_chain) {
-
                     assert(row_header->version_number > new_version->version_number);
-
-                    accesses[rid]->orig_row->manager->blatch = false;
-
+#if NO_DIRTY
+#else
+                    accesses[rid]->orig_row->manager->unlock_row(this);
+#endif
                     new_version->retire = nullptr;
                     new_version->retire_ID = 0;
-
                     new_version->prev = NULL;
-                    new_version->next = NULL;
-
+//                    new_version->next = NULL;
+                    new_version->type = AT;
                     //TODO: can we just free this object without reset retire and retire_ID?
-
-                    _mm_free(new_version);
-                    new_version = NULL;
+//                    _mm_free(new_version);
+//                    new_version = NULL;
                 }
                     // [Need Latch]: We are in the same chain.
                 else{
@@ -369,10 +481,8 @@ void txn_man::abort_process(txn_man * txn){
                     old_version = new_version->next;
                     uint64_t vh_depth = (row_header->version_number & DEEP_LENGTH);
                     uint64_t my_depth = (new_version->version_number & DEEP_LENGTH);
-
                     // Check again to avoid acquiring unnecessary latch. [Only need latch when I'm in the front of version_header]
                     if(vh_depth >= my_depth) {
-
                         // new version is the newest version
                         if (new_version == row_header) {
                             if (new_version->prev == NULL) {
@@ -382,14 +492,13 @@ void txn_man::abort_process(txn_man * txn){
 
                                 assert(old_version->prev == new_version);
                                 old_version->prev = NULL;
-                                new_version->next = NULL;
+                                new_version->type = AT;
 
                                 // Recursively update the chain_number of uncommitted old version and the first committed verison.
                                 Version* version_retrieve = accesses[rid]->orig_row->manager->version_header;
 
                                 while(version_retrieve->begin_ts == UINT64_MAX){
                                     assert(version_retrieve->retire != NULL);
-
                                     version_retrieve->version_number += CHAIN_NUMBER_ADD_ONE;
                                     version_retrieve = version_retrieve->next;
                                 }
@@ -414,14 +523,13 @@ void txn_man::abort_process(txn_man * txn){
                                 }
 
                                 new_version->prev = NULL;
-                                new_version->next = NULL;
+                                new_version->type = AT;
 
                                 // Recursively update the chain_number of uncommitted old version and the first committed verison.
                                 Version* version_retrieve = accesses[rid]->orig_row->manager->version_header;
 
                                 while(version_retrieve->begin_ts == UINT64_MAX){
                                     assert(version_retrieve->retire != NULL);
-
                                     version_retrieve->version_number += CHAIN_NUMBER_ADD_ONE;
                                     version_retrieve = version_retrieve->next;
                                 }
@@ -442,7 +550,7 @@ void txn_man::abort_process(txn_man * txn){
                             }
 
                             new_version->prev = NULL;
-                            new_version->next = NULL;
+                            new_version->type = AT;
                         }
 
                         new_version->retire = nullptr;
@@ -450,31 +558,36 @@ void txn_man::abort_process(txn_man * txn){
 
                         //TODO: Notice that begin_ts and end_ts of new_version both equal to MAX
 
-                        _mm_free(new_version);
-                        new_version = NULL;
+//                        _mm_free(new_version);
+//                        new_version = NULL;
 
-                        accesses[rid]->orig_row->manager->blatch = false;
+#if NO_DIRTY
+#else
+                        accesses[rid]->orig_row->manager->unlock_row(this);
+#endif
                     }
                     else{
                         // Possible: May be I'm the version_header at first, but when I wait for blatch, someone changes the version_header to a new version.
                         assert(vh_chain == my_chain && vh_depth < my_depth);
 
-                        accesses[rid]->orig_row->manager->blatch = false;
+#if NO_DIRTY
+#else
+                        accesses[rid]->orig_row->manager->unlock_row(this);
+#endif
 
                         new_version->retire = nullptr;
                         new_version->retire_ID = 0;
 
                         new_version->prev = NULL;
-                        new_version->next = NULL;
+                        new_version->type = AT;
 
                         //TODO: can we just free this object without reset retire and retire_ID?
 
-                        _mm_free(new_version);
-                        new_version = NULL;
+//                        _mm_free(new_version);
+//                        new_version = NULL;
                     }
                 }
             }
-
         }
     }
 #else
@@ -544,19 +657,41 @@ void txn_man::abort_process(txn_man * txn){
 #endif
 
 
-    /**
-     * Cascading abort
-     */
-    for(auto & dep_pair :hotspot_friendly_dependency){
-
+    for(auto & dep_pair :*hotspot_friendly_dependency){
         // only inform the txn which wasn't aborted
-        if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id && dep_pair.dep_txn->status == RUNNING){
-            if((dep_pair.dep_type == WRITE_WRITE_) || (dep_pair.dep_type == WRITE_READ_)){
-                dep_pair.dep_txn->set_abort(true);
+//        if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id){
+        if (dep_pair.dep_txn->status == RUNNING || dep_pair.dep_txn->status == validating){
+//                if ( dep_pair.dep_txn->get_hotspot_friendly_txn_id() == this->wound_txn_id){
+            if ( dep_pair.dep_type == READ_WRITE_ || dep_pair.dep_type == WRITE_WRITE_){
+                COMPILER_BARRIER
+                dep_pair.dep_txn->SemaphoreSubOne();
+                COMPILER_BARRIER
+            } else{
+                dep_pair.dep_txn->ready_abort = true;
+                dep_pair.dep_txn->set_abort(5);
+#if PF_MODEL
+                INC_STATS(txn->get_thd_id(), find_circle_cascading, 1);
+#endif
             }
-            else{           // Have to release the semaphore of txns who READ_WRITE_ depend on me, otherwise they can never commit and causes deadlock.
+        }
+        // Making concurrent_vector correct
+        dep_pair.dep_type = INVALID;
+    }
+    hotspot_friendly_dependency->clear();
+
+    uint64_t endtime = get_sys_clock();
+    INC_STATS(this->get_thd_id(), time_abort_processing, endtime - starttime);
+
+#if DEADLOCK_DETECTION
+    /*** Cascading abort */
+    for(auto & dep_pair :hotspot_friendly_dependency){
+        // only inform the txn which wasn't aborted
+        if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id && (dep_pair.dep_txn->status == RUNNING  )){
+            if((dep_pair.dep_type == WRITE_WRITE_) || (dep_pair.dep_type == WRITE_READ_)){
+                dep_pair.dep_txn->set_abort(5);
+            } else{           // Have to release the semaphore of txns who READ_WRITE_ depend on me, otherwise they can never commit and causes deadlock.
                 assert(dep_pair.dep_type == READ_WRITE_);
-                if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id && dep_pair.dep_txn->status == RUNNING) {         // Recheck: Don't inform txn_manger who is already running another txn. Otherwise, the semaphore of that txn will be decreased too much.
+                if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id &&  (dep_pair.dep_txn->status == RUNNING )) {         // Recheck: Don't inform txn_manger who is already running another txn. Otherwise, the semaphore of that txn will be decreased too much.
                     dep_pair.dep_txn->SemaphoreSubOne();
                 }
             }
@@ -565,6 +700,8 @@ void txn_man::abort_process(txn_man * txn){
         // Making concurrent_vector correct
         dep_pair.dep_type = INVALID;
     }
+#endif
+
 }
 
 
