@@ -25,6 +25,9 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
 #endif
 #if CC_ALG == BAMBOO
     commit_barriers = 0;
+#if TEST_BB_ABORT
+    bb_dependency = new Dependency2();
+#endif
 #endif
     ready_part = 0;
     row_cnt = 0;
@@ -42,11 +45,7 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
     status_latch = false;
     has_conflict = false;
     hotspot_friendly_dependency = new Dependency();
-//    graph_ = new std::unordered_map<uint64_t, std::vector<uint64_t> *> ();
-//    for (uint32_t i = 0; i < g_thread_cnt; i++) {
-//        auto dependency_vec= new std::vector<uint64_t>;
-//        graph_->insert(std::make_pair(uint64_t(i), dependency_vec));
-//    }
+
 #if DEADLOCK_DETECTION
     bloom_parameters parameters;
     parameters.projected_element_count = 5;
@@ -70,13 +69,6 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
 
 #endif
 
-#if TEST_BB_ABORT
-    graph_ = new std::unordered_map<uint64_t, std::vector<uint64_t> *> ();
-    for (uint32_t i = 0; i < g_thread_cnt; i++) {
-        auto dependency_vec= new std::vector<uint64_t>;
-        graph_->insert(std::make_pair(uint64_t(i), dependency_vec));
-    }
-#endif
 
     num_accesses_alloc = 0;
 
@@ -137,6 +129,11 @@ uint64_t txn_man::get_thd_id() {
     return h_thd->get_thd_id();
 }
 
+bool txn_man::insert_hotspot(uint64_t hots){
+    auto ret = h_thd->insert_hotspots(hots);
+    return ret;
+}
+
 bool txn_man::atomic_set_ts(ts_t ts) {
     if (ATOM_CAS(timestamp, 0, ts)) {
         return true;
@@ -166,12 +163,11 @@ ts_t txn_man::get_ts() {
 
 void txn_man::cleanup(RC rc) {
 #if TEST_BB_ABORT
-    if (!bb_dependency.empty()){
-        bb_dependency.clear();
+    if (!bb_dependency->empty()){
+        bb_dependency->clear();
     }
-    for (auto itr = graph_->begin(); itr != graph_->end(); ++itr) {
-        std::vector<uint64_t>* vec = itr->second;
-        vec->clear();
+    if (!bb_waiting.empty()){
+        bb_waiting.clear();
     }
 #endif
 

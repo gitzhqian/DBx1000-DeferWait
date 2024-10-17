@@ -4,6 +4,7 @@
 #include "bloom_filter.h"
 #include <unordered_map>
 #include <unordered_set>
+#include <stack>
 #include "manager.h"
 #include "row.h"
 //#include <unordered_set>
@@ -97,22 +98,7 @@ public:
     txnid_t 		    txn_id;
     uint64_t            abort_cnt;          // Actually this attribute is useless because no one accesses it.
 
-#if TEST_BB_ABORT
-    //for test
-    std::vector<std::pair<uint64_t,bool>> txn_hotspot_set;
-    std::unordered_map<uint64_t, std::vector<uint64_t> *> *graph_ ;
-    struct dep_element2{
-        txn_man* dep_txn;
-        uint64_t dep_txn_id;             // the txn_id of retire_txn, used in writing phase to avoid wrong semaphore--
-        DepType dep_type;
-    };
-    typedef  tbb::concurrent_vector<dep_element2> Dependency;
-    Dependency          bb_dependency;
-    void PushDependency(txn_man *dep_txn, uint64_t dep_txn_id,DepType depType) {
-        dep_element2 temp_element = {dep_txn,dep_txn_id,depType};
-        bb_dependency.push_back(temp_element);
-    }
-#endif
+
 
     // update per request
     row_t * volatile    cur_row;
@@ -200,7 +186,7 @@ public:
 
     Dependency          *hotspot_friendly_dependency;
 #if DEADLOCK_DETECTION
-#if USE_BLOOM_FILTER
+    #if USE_BLOOM_FILTER
     bloom_filter        hotspot_friendly_waiting_set;           // Deadlock Detection
 #else
     tbb::concurrent_unordered_set<uint64_t>  hotspot_friendly_waiting_set;
@@ -334,6 +320,88 @@ public:
     ts_t                get_exec_time() {return get_sys_clock() - start_ts;};
 #if CC_ALG == BAMBOO
     RC                  retire_row(int access_cnt);
+#if TEST_BB_ABORT
+    //for test
+    tbb::concurrent_unordered_set<uint64_t>  bb_waiting;
+    struct dep_element2{
+        txn_man* dep_txn;
+        uint64_t dep_txn_id;             // the txn_id of retire_txn, used in writing phase to avoid wrong semaphore--
+        DepType dep_type;
+    };
+    typedef  tbb::concurrent_vector<dep_element2> Dependency2;
+    Dependency2          *bb_dependency;
+
+    void PushDependency(txn_man *dep_txn, uint64_t dep_txn_id,DepType depType) {
+        dep_element2 temp_element = {dep_txn,dep_txn_id,depType};
+        bb_dependency->push_back(temp_element);
+    }
+
+
+    void InsertWaitingSet(uint64_t txn_id) {
+        bb_waiting.insert(txn_id);
+    }
+
+    // Judge whether an element is in waiting_set
+    bool WaitingSetContains(uint64_t txn_id) {
+        auto itr = bb_waiting.find(txn_id);
+        if (itr != bb_waiting.cend() ) {
+            return true;
+        }else {
+            return false;
+        }
+    }
+    void UnionWaitingSet(const tbb::concurrent_unordered_set<uint64_t> wait_set){
+        for (auto itr = wait_set.cbegin(); itr != wait_set.cend(); ++itr) {
+            bb_waiting.insert(*itr);
+        }
+
+        std::stack<txn_man *> dep_stack;
+        for (auto &dep_pair: *bb_dependency) {
+            dep_stack.push(dep_pair.dep_txn);
+        }
+        std::unordered_set<uint64_t> *path = new std::unordered_set<uint64_t>();
+
+        while (true){
+            std::set<txn_man *> dep_list;
+            while (!dep_stack.empty()){
+                txn_man *txn_ = dep_stack.top();
+                if (txn_ != nullptr ){
+                    if (path->find(txn_->txn_id) != path->end()){
+                        dep_list.insert(txn_);
+                    }
+                }
+                dep_stack.pop();
+            }
+
+            for (auto &dep_pair: dep_list) {
+                auto dep_txn_ = dep_pair;
+                if (dep_txn_ == nullptr) continue;
+
+                if (dep_txn_->status == RUNNING){
+                    for (auto itr = bb_waiting.cbegin(); itr != bb_waiting.cend(); ++itr) {
+                        dep_txn_->InsertWaitingSet(*itr);
+                    }
+
+                    auto dep_txn_deps = dep_txn_->bb_dependency;
+                    if (!dep_txn_deps->empty()){
+                        for (auto &dep_: *dep_txn_deps) {
+                            if (dep_.dep_txn != nullptr && dep_txn_->status == RUNNING){
+                                dep_stack.push(dep_.dep_txn);
+                            }
+                        }
+                    }
+                }
+
+                path->insert(dep_txn_->txn_id);
+            }
+
+
+            if (dep_stack.empty()){
+                break;
+            }
+        }
+    }
+#endif
 #endif
     // [VLL]
     row_t * 		    get_row(row_t * row, access_t type);
@@ -375,7 +443,7 @@ public:
     }
 
 #if DEADLOCK_DETECTION
-#if USE_BLOOM_FILTER
+    #if USE_BLOOM_FILTER
     /* Helper Functions for waiting_set */
     // Record a txn in waiting_set
     void InsertWaitingSet(uint64_t txn_id) {
@@ -416,7 +484,7 @@ public:
     bool WaitingSetContains(uint64_t txn_id) {
         auto itr = hotspot_friendly_waiting_set.find(txn_id);
         if (itr != hotspot_friendly_waiting_set.cend() ) {
-            return true;
+           return true;
         }else {
             return false;
         }
@@ -466,6 +534,8 @@ public:
         }
 #endif
 #endif
+
+    bool insert_hotspot(uint64_t hots) ;
 
 protected:
     void 			    insert_row(row_t * row, table_t * table);

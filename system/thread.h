@@ -6,7 +6,7 @@ class workload;
 class base_query;
 
 class thread_t {
-  public:
+public:
     uint64_t _thd_id;
     workload * _wl;
 
@@ -28,8 +28,17 @@ class thread_t {
     ts_t 		get_next_ts();
     ts_t 		get_next_n_ts(int n);
 
+    bool        insert_hotspots(uint64_t hots){
+        auto ret = hotspots->insert(hots);
+        if (ret.second){
+            return true;
+        }else{
+            return false;
+        }
+    }
 
-  private:
+
+private:
     uint64_t 	_host_cid;
     uint64_t 	_cur_cid;
     ts_t 		_curr_ts;
@@ -40,6 +49,8 @@ class thread_t {
     // added for wound wait
     base_query * curr_query;
     ts_t         starttime;
+
+    std::set<uint64_t> *hotspots;
 
     // A restart buffer for aborted txns.
     struct AbortBufferEntry	{

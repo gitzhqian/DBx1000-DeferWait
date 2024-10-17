@@ -234,29 +234,29 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
 
 #if SYNTHETIC_YCSB
         assert(part_id == 0);
-#if NUM_HS == 1         // [Single Hotspot]
-#if POS_HS == RANDOM
-        if (tmp == hotspot_position) {
-            // insert hotpost at the beginning
+            #if NUM_HS == 1         // [Single Hotspot]
+              #if POS_HS == RANDOM
+                if (tmp == hotspot_position) {
+                    // insert hotpost at the beginning
 //                    req->rtype = FIRST_HS;
-            row_id = table_size - 1;
+                    row_id = table_size - 1;
 
-            // 2-28 Support variable operation type for hotspot
-            double temp_r;
-            drand48_r(&_query_thd->buffer, &temp_r);
-            if(temp_r < READ_HOTSPOT_RATIO){
-                req->rtype = RD;
-            } else{
-                req->rtype = WR;
-            }
+                    // 2-28 Support variable operation type for hotspot
+                    double temp_r;
+                    drand48_r(&_query_thd->buffer, &temp_r);
+                    if(temp_r < READ_HOTSPOT_RATIO){
+                        req->rtype = RD;
+                    } else{
+                        req->rtype = WR;
+                    }
 
-            // 2-26: Support read_only long transaction in synthetic YCSB. Reset its request type.
-            if(is_long && g_long_txn_read_ratio == 1){
-                req->rtype = RD;
-            }
-        } else {
-#elif POS_HS == TOP
-            if (tmp == 0) {
+                    // 2-26: Support read_only long transaction in synthetic YCSB. Reset its request type.
+                    if(is_long && g_long_txn_read_ratio == 1){
+                        req->rtype = RD;
+                    }
+                } else {
+              #elif POS_HS == TOP
+                if (tmp == 0) {
                     // insert hotpost at the beginning
 //                    req->rtype = FIRST_HS;
                     row_id = table_size - 1;
@@ -337,9 +337,9 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
                 } else {
               #else
                 assert(false);
-#endif
-#elif NUM_HS == 2
-            uint64_t hs1_row_id = table_size - 1;
+            #endif
+            #elif NUM_HS == 2
+                uint64_t hs1_row_id = table_size - 1;
                 uint64_t hs2_row_id = table_size - 2;
                 double flip;
                 drand48_r(&_query_thd->buffer, &flip);
@@ -699,30 +699,30 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
                         }
                     }else {
                 #endif
-#endif
+            #endif
 #endif
 
-            /*
-             * 1. Determine the type of each request.
-             */
-            double r;
-            // get a random number r to determine read/write ratio
-            drand48_r(&_query_thd->buffer, &r);
-            if (r < local_read_perc) {
-                req->rtype = RD;
-            } else if (r >= local_read_perc && r <= g_write_perc + local_read_perc) {
-                req->rtype = WR;
-            } else {
-                req->rtype = SCAN;
-                req->scan_len = SCAN_LEN;
-            }
+        /*
+         * 1. Determine the type of each request.
+         */
+        double r;
+        // get a random number r to determine read/write ratio
+        drand48_r(&_query_thd->buffer, &r);
+        if (r < local_read_perc) {
+            req->rtype = RD;
+        } else if (r >= local_read_perc && r <= g_write_perc + local_read_perc) {
+            req->rtype = WR;
+        } else {
+            req->rtype = SCAN;
+            req->scan_len = SCAN_LEN;
+        }
 
-            /*
-             * 2.1 Determine the row_id of the tuple that current request will access.
-             */
-            //uint64_t table_size = g_synth_table_size / g_virtual_part_cnt;
-            //uint64_t row_id = zipf(table_size - 1, g_zipf_theta);
-            row_id = get_new_row();
+        /*
+         * 2.1 Determine the row_id of the tuple that current request will access.
+         */
+        //uint64_t table_size = g_synth_table_size / g_virtual_part_cnt;
+        //uint64_t row_id = zipf(table_size - 1, g_zipf_theta);
+        row_id = get_new_row();
 
 #if SYNTHETIC_YCSB
         }
@@ -794,7 +794,7 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
 
 #if SYNTHETIC_YCSB && (NUM_HS > 0)
         // works only for g_virtual_part_cnt = 1
-        uint64_t upper = (table_size - NUM_HS - 1) * g_virtual_part_cnt;
+	  uint64_t upper = (table_size - NUM_HS - 1) * g_virtual_part_cnt;
 #endif
         for (int i = request_cnt - 1; i > 0; i--) {
             for (int j = 0; j < i; j ++) {
@@ -803,17 +803,17 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
 
 #if SYNTHETIC_YCSB && (NUM_HS > 0)
                 if (requests[j].key > upper) {
-                    if (j != 0)
-                        a = j - 1;
-                    else
-                        continue;
-                }
-                if (requests[j+1].key > upper) {
-                    if (j + 1 != i)
-                        b = j + 1;
-                    else
-                        continue;
-                }
+					if (j != 0)
+						a = j - 1;
+					else
+						continue;
+				}
+				if (requests[j+1].key > upper) {
+					if (j + 1 != i)
+						b = j + 1;
+					else
+						continue;
+				}
 #endif
 
                 if (requests[a].key > requests[b].key) {
@@ -829,7 +829,7 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
 
 #if SYNTHETIC_YCSB && (NUM_HS > 0)
             if (requests[i].key > upper || (requests[i + 1].key > upper))
-                continue;
+				continue;
 #endif
 
             assert(requests[i].key < requests[i + 1].key);

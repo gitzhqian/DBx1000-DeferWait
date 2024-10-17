@@ -7,7 +7,8 @@
   y(uint64_t, abort_cnt_neworder) y(uint64_t, abort_cnt_payment)         \
   x(double, run_time) x(double, time_abort) x(double, time_cleanup)       \
   x(double, time_lockrow) x(double, time_exec) x(double, time_assign) x(double, time_find_circle)     \
-  x(double, time_creat_version) x(double, time_verify)  \
+  x(double, time_creat_version) x(double, time_verify)                    \
+  y(uint64_t, abort_position) y(uint64_t, abort_position_cnt) y(uint64_t, abort_hotspot) \
   x(double, time_abort_processing) x(double, time_commit_processing) \
   y(uint64_t, find_circle_abort) y(uint64_t, find_circle_cascading)\
   x(double, time_query) x(double, time_get_latch) x(double, time_get_cs)  \

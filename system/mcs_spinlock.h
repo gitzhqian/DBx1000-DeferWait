@@ -11,7 +11,7 @@
 
 class mcslock {
 
-  public:
+public:
     mcslock(): tail(nullptr) {};
 
     struct mcs_node {
@@ -47,21 +47,21 @@ class mcslock {
             mcs_node * expected = me;
             // No successor yet
             if (tail.compare_exchange_strong(expected, nullptr,
-                                         std::memory_order_release,
-                                         std::memory_order_relaxed)) {
+                                             std::memory_order_release,
+                                             std::memory_order_relaxed)) {
                 return;
             }
             // otherwise, another thread is in the process of trying to
             // acquire the lock, so spins waiting for it to finish
             while (me->next == nullptr) {};
         }
-        // memory_barrier();
+        memory_barrier();
         // Unlock next one
         me->next->locked = false;
         me->next = nullptr;
     };
 
-  private:
+private:
     std::atomic<mcs_node*> tail;
 };
 

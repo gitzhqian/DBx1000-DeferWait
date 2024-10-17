@@ -104,7 +104,7 @@ public:
 
     // check priorities
     inline static bool a_higher_than_b(ts_t a, ts_t b) {
-        return a >= b;
+        return a > b;
     };
 
     inline static int assign_ts(ts_t ts, txn_man *txn) {
@@ -139,14 +139,21 @@ public:
             for (auto &dep_pair: dep_list) {
                 auto dep_txn_ = dep_pair;
                 if (dep_txn_ == nullptr) continue;
-                if (path->find(dep_txn_->hotspot_friendly_txn_id) != path->end()) continue;
-                if (check_txn != nullptr && dep_txn_->hotspot_friendly_txn_id == check_txn->hotspot_friendly_txn_id
-                    && check_txn->status == RUNNING){
+                if (path->find(dep_txn_->txn_id) != path->end()) continue;
+                if (check_txn != nullptr && dep_txn_->txn_id == check_txn->txn_id && check_txn->status == RUNNING){
                     check_txn->set_abort();
+                    find = true;
 #if PF_MODEL
                     INC_STATS(txn->get_thd_id(), find_circle_abort, 1);
 #endif
-                    find = true;
+#if ADAPTIVE
+                    auto ret =  txn->insert_hotspot(this->version_header->data->get_primary_key());
+                    if (ret){
+                        INC_STATS(  txn->get_thd_id(), abort_hotspot, 1);
+                    }
+                    INC_STATS(  txn->get_thd_id(), abort_position,  txn->row_cnt);
+                    INC_STATS(  txn->get_thd_id(), abort_position_cnt, 1);
+#endif
                 } else{
                     if (a_higher_than_b(ts, dep_txn_->get_ts()) ){
                         dep_txn_->set_ts(ts);
@@ -161,7 +168,7 @@ public:
                         }
                     }
                 }
-                path->insert(dep_txn_->hotspot_friendly_txn_id);
+                path->insert(dep_txn_->txn_id);
             }
 
             if (find){

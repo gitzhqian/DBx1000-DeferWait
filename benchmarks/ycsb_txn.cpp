@@ -52,16 +52,6 @@ RC ycsb_txn_man::run_txn(base_query * query) {
         DEC_STATS(h_thd->get_thd_id(), run_time, get_sys_clock() - starttime);
     }
 
-#if TEST_BB_ABORT
-    txn_hotspot_set.clear();
-    auto query_hots = m_query->hotspot_set;
-    for (int i = 0; i < query_hots.size(); ++i) {
-        txn_hotspot_set.push_back(std::make_pair(query_hots[i].first,query_hots[i].second));
-    }
-    if (txn_hotspot_set.size() ==1){
-        m_query->request_cnt = 3;
-    }
-#endif
 
     for (uint32_t rid = 0; rid < m_query->request_cnt; rid ++) {
 #if CC_ALG == HOTSPOT_FRIENDLY

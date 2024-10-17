@@ -87,9 +87,6 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
 
     RC rc = RCOK;
     uint64_t txn_id = txn->get_hotspot_friendly_txn_id();
-//    while(!ATOM_CAS(blatch, false, true)){
-//        PAUSE
-//    }
 
     Version * new_version = createNewVersion(txn, access, type);
 
@@ -97,14 +94,9 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
     uint64_t starttime  = get_sys_clock();
 #endif
 
-#if NO_DIRTY
-    while(!ATOM_CAS(blatch, false, true)){
-        PAUSE
-    }
-#else
     lock_row(txn);
-#endif
     COMPILER_BARRIER
+
 #if PF_MODEL
     uint64_t endtime_lockrow = get_sys_clock();
     INC_STATS(txn->get_thd_id(), time_lockrow, endtime_lockrow - starttime);
@@ -115,6 +107,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
     assert(version_header != nullptr);
     auto row_max_ts = version_header->begin_ts;
     auto dep_header_txn = version_header->retire;
+
     // 1.1 if read the uncommitted, check header and compute the ts
     if (dep_header_txn != nullptr) {
         row_max_ts =  *(version_header->dynamic_txn_ts);
@@ -131,7 +124,6 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
             } else {
                 readers = readers->prev;
             }
-
             if (readers == version_header){break;}
         }
     }
@@ -142,62 +134,75 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
     //2.1 if header is uncommitted or has uncommitted reads
     if (dep_header_txn != nullptr || dep_read_ != nullptr) {
         if (type == P_REQ) {
-            if (dep_read_ != nullptr){
-                dep_txn = dep_read_->retire;
-            }else{
-                dep_txn = dep_header_txn ;
-            }
             read_uncommit = true;
         } else{
             if (dep_header_txn != nullptr){
-                dep_txn = dep_header_txn ;
                 read_uncommit = true;
             }
         }
     }
     //3. compute ts
     //3.1 if read the committed
-    if (a_higher_than_b(row_max_ts, ts)){
-        ts = row_max_ts + 1;
-        txn->set_ts(ts);
-    }
-    if (!read_uncommit){
-        if (a_higher_than_b(row_max_ts, ts)){
-            ts = row_max_ts + 1;
-            txn->set_ts(ts);
-        }
-    }else{
-#if NO_DEFER
-        if (type == P_REQ) {
-            if (a_higher_than_b(row_max_ts, ts)) {
-                dep_txn->set_abort();
-                auto version_next = version_header->next;
-                dep_txn = version_next->retire;
-                while (dep_txn != nullptr) {
-                    if (dep_txn->timestamp > ts) {
-                        dep_txn->set_abort();
+    // assign timestamp at the first conflicts, at the commit if ts =0 then calculate ts
+    if (read_uncommit && type == P_REQ){
+        if (ts == 0){
+            std::stack<txn_man *> dep_txns_stck;
+            auto version_next = version_header;
+            dep_txn = version_next->retire;
+            while (true) {
+                if (version_next->begin_ts != UINT64_MAX) break;
+                if (dep_txn != nullptr){
+                    if (dep_txn->timestamp == 0) {
+                        dep_txns_stck.push(dep_txn);
                     }
-                    version_next = version_next->next;
-                    dep_txn = version_next->retire;
+                }
+                version_next = version_next->next;
+                dep_txn = version_next->retire;
+            }
+
+            while (!dep_txns_stck.empty()){
+                auto tp_txn = dep_txns_stck.top();
+                assign_ts(0, tp_txn);
+                dep_txns_stck.pop();
+            }
+
+            ts = assign_ts(ts, txn);
+        }
+
+#if NO_DEFER
+        auto version_next_1 = version_header;
+        dep_txn = version_next_1->retire;
+        while (true) {
+            if (version_next_1->begin_ts != UINT64_MAX)  break;
+            if (dep_txn != nullptr && (dep_txn->status == RUNNING)){
+                if ( a_higher_than_b(dep_txn->timestamp, ts) ) {
+                    dep_txn->set_abort();
+#if PF_MODEL
+                    INC_STATS(txn->get_thd_id(), find_circle_abort, 1);
+#endif
                 }
             }
+            version_next_1 = version_next_1->next;
+            dep_txn = version_next_1->retire;
         }
 #else
-        if (!txn->has_conflict && read_uncommit){
-            //3.2 if the has not read any other versions
-            assign_ts(ts, txn);
-            txn->has_conflict = true;
-        }else{
-            //3.3 if read the committed; if has read any other versions
-            if (a_higher_than_b(row_max_ts, ts)){
-                ts = row_max_ts + 1;
-                txn->set_ts(ts);
-                defer_need = true;
-
+        auto version_next_2 = version_header;
+        dep_txn = version_next_2->retire;
+        while (true) {
+            if (version_next_2->begin_ts != UINT64_MAX) break;
+            if (dep_txn != nullptr){
+                if (a_higher_than_b(dep_txn->timestamp, ts)) {
+                    ts = dep_txn->timestamp + 1;
+                }
             }
+            version_next_2 = version_next_2->next;
+            dep_txn = version_next_2->retire;
         }
+
+        defer_need = true;
 #endif
     }
+
 
 #if PF_MODEL
     uint64_t endtime_assign = get_sys_clock();
@@ -205,55 +210,67 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
     starttime  = endtime_assign;
 #endif
 
-#if NO_DEFER
-#else
     //3. defer and detect cycle
+    dep_txn = version_header->retire;
     if (defer_need && dep_txn!= nullptr){
         uint64_t defer_ts = ts + 1;
         auto *path = new std::unordered_set<uint64_t>();
         auto ret = detect_cycle(txn, dep_txn, defer_ts, path);
-        if (ret){
-            // dep_txn arise a cycle, then is aborted
-            if (type == P_REQ && dep_read_ != nullptr) {
-                auto version_next = dep_read_->prev;
-                while (true){
-                    dep_txn = version_next->retire;
-                    if (dep_txn != nullptr){
-                        if (path->find(dep_txn->hotspot_friendly_txn_id) != path->end()){
-                            dep_txn->set_abort();
+        // dep_txn arise a cycle, then is aborted
+        if (type == P_REQ && dep_read_ != nullptr) {
+            auto version_next = dep_read_->prev;
+            while (true){
+                if (version_next->begin_ts != UINT64_MAX) break;
+                dep_txn = version_next->retire;
+                if (dep_txn != nullptr && dep_txn->status == RUNNING){
+                    if (path->find(dep_txn->txn_id) != path->end()){
+                        dep_txn->set_abort();
 #if PF_MODEL
-                    INC_STATS(txn->get_thd_id(), find_circle_abort, 1);
+                        INC_STATS(txn->get_thd_id(), find_circle_abort, 1);
 #endif
+#if ADAPTIVE
+                        auto ret =  txn->insert_hotspot(this->version_header->data->get_primary_key());
+                        if (ret){
+                            INC_STATS(  txn->get_thd_id(), abort_hotspot, 1);
                         }
-                    } else{
-                        break;
-                    }
-                    if (version_next->type == WR){
-                        version_next = version_next->next;
-                    }else{
-                        version_next = version_next->prev;
+                        INC_STATS(  txn->get_thd_id(), abort_position,  txn->row_cnt);
+                        INC_STATS(  txn->get_thd_id(), abort_position_cnt, 1);
+#endif
                     }
                 }
-            } else{
-                auto version_next = version_header->next;
-                while (true){
-                    dep_txn = version_next->retire;
-                    if (dep_txn != nullptr){
-                        if (path->find(dep_txn->hotspot_friendly_txn_id) != path->end()){
-                            dep_txn->set_abort();
-#if PF_MODEL
-                            INC_STATS(txn->get_thd_id(), find_circle_abort, 1);
-#endif
-                        }
-                    } else{
-                        break;
-                    }
+
+                if (version_next->type == WR){
                     version_next = version_next->next;
+                }else{
+                    version_next = version_next->prev;
                 }
+            }
+        } else{
+            auto version_next = version_header->next;
+            while (true){
+                if (version_next->begin_ts != UINT64_MAX) break;
+                dep_txn = version_next->retire;
+                if (dep_txn != nullptr && dep_txn->status == RUNNING){
+                    if (path->find(dep_txn->txn_id) != path->end()){
+                        dep_txn->set_abort();
+#if PF_MODEL
+                        INC_STATS(txn->get_thd_id(), find_circle_abort, 1);
+#endif
+#if ADAPTIVE
+                        auto ret =  txn->insert_hotspot(this->version_header->data->get_primary_key());
+                        if (ret){
+                            INC_STATS(  txn->get_thd_id(), abort_hotspot, 1);
+                        }
+                        INC_STATS(  txn->get_thd_id(), abort_position,  txn->row_cnt);
+                        INC_STATS(  txn->get_thd_id(), abort_position_cnt, 1);
+#endif
+                    }
+                }
+
+                version_next = version_next->next;
             }
         }
     }
-#endif
 #if PF_MODEL
     uint64_t endtime_find = get_sys_clock();
     INC_STATS(txn->get_thd_id(), time_find_circle, endtime_find - starttime );
@@ -262,12 +279,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
 
     if (txn->ready_abort){
         rc = Abort;
-        COMPILER_BARRIER
-#if NO_DIRTY
-        blatch = false;
-#else
         unlock_row(txn);
-#endif
         return rc;
     }
 
@@ -280,32 +292,32 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
         // This optimization isn't suitable for synthetic YCSB.
 #if !SYNTHETIC_YCSB
         if(g_read_perc == 1){
-                    Version *temp_version = version_header;
-                    auto temp_retire_txn = temp_version->retire;
-                    if (!temp_retire_txn) {           // committed version
-                        rc = RCOK;
+            Version *temp_version = version_header;
+            auto temp_retire_txn = temp_version->retire;
+            if (!temp_retire_txn) {           // committed version
+                rc = RCOK;
 //                        access->tuple_version = temp_version;
 //                        createNewVersion(txn, access, RD, version_header);
-                        update_version(txn, new_version, RD);
-                        ((Version *)access->tuple_version)->begin_ts = temp_version->begin_ts;
-                        COMPILER_BARRIER
-                        unlock_row(txn);
-                        return rc;
+                update_version(txn, new_version, RD);
+                ((Version *)access->tuple_version)->begin_ts = temp_version->begin_ts;
+                COMPILER_BARRIER
+                unlock_row(txn);
+                return rc;
 //                        return rc;
-                    } else {           //uncommitted version
-                        if (temp_retire_txn->status == committing || temp_retire_txn->status == COMMITED) {
+            } else {           //uncommitted version
+                if (temp_retire_txn->status == committing || temp_retire_txn->status == COMMITED) {
 //                            access->tuple_version = temp_version;
 //                            createNewVersion(txn, access, RD, version_header);
-                            update_version(txn, new_version, RD);
-                            assert(temp_version->begin_ts != UINT64_MAX);
-                            ((Version *)access->tuple_version)->begin_ts = temp_version->begin_ts;
-                            COMPILER_BARRIER
-                            unlock_row(txn);
-                            return rc;
+                    update_version(txn, new_version, RD);
+                    assert(temp_version->begin_ts != UINT64_MAX);
+                    ((Version *)access->tuple_version)->begin_ts = temp_version->begin_ts;
+                    COMPILER_BARRIER
+                    unlock_row(txn);
+                    return rc;
 //                            return rc;
-                        }
-                    }
                 }
+            }
+        }
 #endif
 #endif
 #if VERSION_CHAIN_CONTROL
@@ -326,14 +338,8 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                 rc = RCOK;
                 update_version(txn, new_version, RD);
                 assert(version_header->begin_ts != UINT64_MAX);
-                auto max_ts = version_header->begin_ts;
-                ((Version *)access->tuple_version)->begin_ts = max_ts;
-                COMPILER_BARRIER
-#if NO_DIRTY
-                blatch = false;
-#else
+
                 unlock_row(txn);
-#endif
 #if PF_MODEL
                 uint64_t endtime_exec = get_sys_clock();
                 INC_STATS(txn->get_thd_id(), time_exec, endtime_exec - starttime);
@@ -343,7 +349,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                 // uncommitted version
             else {
                 assert(retire_txn != txn);
-                assert(version_header->retire_ID == retire_txn->hotspot_friendly_txn_id);
+//                assert(version_header->retire_ID == retire_txn->hotspot_friendly_txn_id);
 #if DEADLOCK_DETECTION
                 // [DeadLock]
                 if (retire_txn->WaitingSetContains(txn_id) && retire_txn->set_abort() == RUNNING) {
@@ -380,23 +386,16 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                 if (temp_status == committing || temp_status == COMMITED || temp_status == validating || temp_status == writing) {
                     update_version(txn, new_version, RD);
                     assert(false);
-                    COMPILER_BARRIER
-#if NO_DIRTY
-                    blatch = false;
-#else
+
                     unlock_row(txn);
-#endif
 #if PF_MODEL
                     uint64_t endtime_exec = get_sys_clock();
                     INC_STATS(txn->get_thd_id(), time_exec, endtime_exec - starttime);
 #endif
                     return rc;
                 } else if (temp_status == RUNNING ) {       // record dependency
-                    COMPILER_BARRIER
                     txn->SemaphoreAddOne();
-                    COMPILER_BARRIER
-                    retire_txn->PushDependency(txn, txn->get_hotspot_friendly_txn_id(), DepType::WRITE_READ_);  //dependent on me(retire)
-                    assert(retire_txn->get_ts() < ts);
+                    retire_txn->PushDependency(txn, txn->get_txn_id(), DepType::WRITE_READ_);  //dependent on me(retire)
                     txn->insert_i_dependency_on(retire_txn, DepType::WRITE_READ_);
 #if DEADLOCK_DETECTION
                     retire_txn->PushDependency(txn, txn->get_hotspot_friendly_txn_id(), DepType::WRITE_READ_);
@@ -410,15 +409,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
 #endif
                     // Record in Access Object
                     update_version(txn, new_version, RD);
-                    auto version_dynamic_ts = *version_header->dynamic_txn_ts;
-                    assert(retire_txn->get_ts() == version_dynamic_ts);
-                    ((Version *)access->tuple_version)->begin_ts = version_dynamic_ts ;
-                    COMPILER_BARRIER
-#if NO_DIRTY
-                    blatch = false;
-#else
                     unlock_row(txn);
-#endif
 #if PF_MODEL
                     uint64_t endtime_exec = get_sys_clock();
                     INC_STATS(txn->get_thd_id(), time_exec, endtime_exec - starttime);
@@ -435,7 +426,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                         version_retrieve = version_retrieve->next;
                     }
                     // Update the chain-number of the first committed version.
-                    assert(version_retrieve->begin_ts != UINT64_MAX && version_retrieve->retire == NULL && version_retrieve->retire_ID == 0);
+//                        assert(version_retrieve->begin_ts != UINT64_MAX && version_retrieve->retire == NULL && version_retrieve->retire_ID == 0);
                     version_retrieve->version_number += CHAIN_NUMBER_ADD_ONE;
 #endif
                     assert(version_header->end_ts == INF && retire_txn->status == ABORTED);
@@ -475,10 +466,8 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                     while (true){
                         auto dep_txn = readers_->retire;
                         if (readers_->type == RD && dep_txn!= nullptr && dep_txn->status == RUNNING){
-                            COMPILER_BARRIER
                             txn->SemaphoreAddOne();
-                            COMPILER_BARRIER
-                            dep_txn->PushDependency(txn, txn->get_hotspot_friendly_txn_id(), DepType::READ_WRITE_);
+                            dep_txn->PushDependency(txn, txn->get_txn_id(), DepType::READ_WRITE_);
                             txn->insert_i_dependency_on(dep_txn, DepType::READ_WRITE_);
                             dependency_on_rd = true;
                         }
@@ -493,12 +482,8 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                     rc = RCOK;
                     assert(version_header->begin_ts != UINT64_MAX);
                     update_version(txn, new_version, WR);
-                    COMPILER_BARRIER
-#if NO_DIRTY
-                    blatch = false;
-#else
+
                     unlock_row(txn);
-#endif
 #if PF_MODEL
                     uint64_t endtime_exec = get_sys_clock();
                     INC_STATS(txn->get_thd_id(), time_exec, endtime_exec - starttime);
@@ -508,7 +493,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                     // uncommitted version, there are uncommitted versions, then it will dirty write
                 else {
                     assert(retire_txn != txn);
-                    assert(version_header->retire_ID == retire_txn->hotspot_friendly_txn_id);
+//                    assert(version_header->retire_ID == retire_txn->hotspot_friendly_txn_id);
 #if DEADLOCK_DETECTION
                     // [DeadLock]
                     // deadlock detection:
@@ -549,13 +534,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                     if (temp_status == committing || temp_status == COMMITED || temp_status == validating || temp_status == writing) {
                         // create new version & record current row in accesses
                         update_version(txn, new_version, WR);
-                        assert(false);
-                        COMPILER_BARRIER
-#if NO_DIRTY
-                        blatch = false;
-#else
                         unlock_row(txn);
-#endif
 #if PF_MODEL
                         uint64_t endtime_exec = get_sys_clock();
                         INC_STATS(txn->get_thd_id(), time_exec, endtime_exec - starttime);
@@ -563,10 +542,8 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                         return rc;
                     } else if (temp_status == RUNNING) {       // record dependency
                         if (!dependency_on_rd){
-                            COMPILER_BARRIER
                             txn->SemaphoreAddOne();
-                            COMPILER_BARRIER
-                            retire_txn->PushDependency(txn, txn->get_hotspot_friendly_txn_id(), DepType::WRITE_WRITE_);
+                            retire_txn->PushDependency(txn, txn->get_txn_id(), DepType::WRITE_WRITE_);
                             txn->insert_i_dependency_on(retire_txn, DepType::WRITE_WRITE_);
                         }
 #if DEADLOCK_DETECTION
@@ -581,12 +558,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                             }
 #endif
                         update_version(txn, new_version, WR);
-                        COMPILER_BARRIER
-#if NO_DIRTY
-                        blatch = false;
-#else
                         unlock_row(txn);
-#endif
 #if PF_MODEL
                         uint64_t endtime_exec = get_sys_clock();
                         INC_STATS(txn->get_thd_id(), time_exec, endtime_exec - starttime);
@@ -603,7 +575,7 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
                             version_retrieve = version_retrieve->next;
                         }
                         // Update the chain-number of the first committed version.
-                        assert(version_retrieve->begin_ts != UINT64_MAX && version_retrieve->retire == NULL && version_retrieve->retire_ID == 0);
+//                            assert(version_retrieve->begin_ts != UINT64_MAX && version_retrieve->retire == NULL && version_retrieve->retire_ID == 0);
                         version_retrieve->version_number += CHAIN_NUMBER_ADD_ONE;
 #endif
                         assert(version_header->end_ts == INF && retire_txn->status == ABORTED);
@@ -625,12 +597,8 @@ RC Row_hotspot_friendly::access(txn_man * txn, TsType type, Access * access){
     INC_STATS(txn->get_thd_id(), time_exec, endtime_exec - starttime);
 #endif
 
-    COMPILER_BARRIER
-#if NO_DIRTY
-    blatch = false;
-#else
     unlock_row(txn);
-#endif
+    COMPILER_BARRIER
 
     return rc;
 }
@@ -645,7 +613,7 @@ Version *Row_hotspot_friendly::createNewVersion(txn_man * txn, Access * access ,
     new_version->begin_ts = INF;
     new_version->end_ts = INF;
     new_version->retire = txn;
-    new_version->retire_ID = txn->get_hotspot_friendly_txn_id();
+    new_version->retire_ID = txn->get_txn_id();
     access->tuple_version = new_version;
 
     new_version->dynamic_txn_ts = (volatile ts_t *)&txn->timestamp;

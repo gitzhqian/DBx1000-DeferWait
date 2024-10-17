@@ -5,7 +5,7 @@
 // Simulation + Hardware
 /***********************************************/
 #define TERMINATE_BY_COUNT true
-#define   THREAD_CNT                       20
+#define   THREAD_CNT                       1
 #define PART_CNT					1
 // each transaction only accesses 1 virtual partition. But the lock/ts manager and index are not aware of such partitioning. VIRTUAL_PART_CNT describes the request distribution and is only used to generate queries. For HSTORE, VIRTUAL_PART_CNT should be the same as PART_CNT.
 #define VIRTUAL_PART_CNT			1
@@ -144,7 +144,7 @@
 #define INIT_PARALLELISM			8
 // SYNTH_TABLE_SIZE: tuple count of the YCSB table
 //#define SYNTH_TABLE_SIZE 100
-#define SYNTH_TABLE_SIZE 			100000000
+#define SYNTH_TABLE_SIZE 			100000
 #define ZIPF_THETA 					0.8
 #define READ_PERC 					             0.5
 #define WRITE_PERC 					             0.5

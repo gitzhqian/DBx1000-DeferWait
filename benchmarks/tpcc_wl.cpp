@@ -271,28 +271,28 @@ void tpcc_wl::init_tab_stock(uint64_t wid) {
         row->set_value(S_REMOTE_CNT, 0);
 #if !TPCC_SMALL
         char s_dist[25];
-        char row_name[10] = "S_DIST_";
-        for (int i = 1; i <= 10; i++) {
-            if (i < 10) {
-                row_name[7] = '0';
-                row_name[8] = i + '0';
-            } else {
-                row_name[7] = '1';
-                row_name[8] = '0';
-            }
-            row_name[9] = '\0';
-            MakeAlphaString(24, 24, s_dist, wid-1);
-            row->set_value(row_name, s_dist);
-        }
-        row->set_value(S_YTD, 0);
-        row->set_value(S_ORDER_CNT, 0);
-        char s_data[50];
-        int len = MakeAlphaString(26, 50, s_data, wid-1);
-        if (rand() % 100 < 10) {
-            int idx = URand(0, len - 8, wid-1);
-            strcpy(&s_data[idx], "original");
-        }
-        row->set_value(S_DATA, s_data);
+		char row_name[10] = "S_DIST_";
+		for (int i = 1; i <= 10; i++) {
+			if (i < 10) {
+				row_name[7] = '0';
+				row_name[8] = i + '0';
+			} else {
+				row_name[7] = '1';
+				row_name[8] = '0';
+			}
+			row_name[9] = '\0';
+			MakeAlphaString(24, 24, s_dist, wid-1);
+			row->set_value(row_name, s_dist);
+		}
+		row->set_value(S_YTD, 0);
+		row->set_value(S_ORDER_CNT, 0);
+		char s_data[50];
+		int len = MakeAlphaString(26, 50, s_data, wid-1);
+		if (rand() % 100 < 10) {
+			int idx = URand(0, len - 8, wid-1);
+			strcpy(&s_data[idx], "original");
+		}
+		row->set_value(S_DATA, s_data);
 #endif
         index_insert(i_stock, stockKey(sid, wid), row, wh_to_part(wid));
     }
@@ -324,32 +324,32 @@ void tpcc_wl::init_tab_cust(uint64_t did, uint64_t wid) {
         row->set_value(C_LAST, c_last);
 #if !TPCC_SMALL
         char tmp[3] = "OE";
-        row->set_value(C_MIDDLE, tmp);
-        char c_first[FIRSTNAME_LEN];
-        MakeAlphaString(FIRSTNAME_MINLEN, sizeof(c_first), c_first, wid-1);
-        row->set_value(C_FIRST, c_first);
-        char street[20];
+		row->set_value(C_MIDDLE, tmp);
+		char c_first[FIRSTNAME_LEN];
+		MakeAlphaString(FIRSTNAME_MINLEN, sizeof(c_first), c_first, wid-1);
+		row->set_value(C_FIRST, c_first);
+		char street[20];
         MakeAlphaString(10, 20, street, wid-1);
-        row->set_value(C_STREET_1, street);
+		row->set_value(C_STREET_1, street);
         MakeAlphaString(10, 20, street, wid-1);
-        row->set_value(C_STREET_2, street);
+		row->set_value(C_STREET_2, street);
         MakeAlphaString(10, 20, street, wid-1);
-        row->set_value(C_CITY, street);
-        char state[2];
-        MakeAlphaString(2, 2, state, wid-1); /* State */
-        row->set_value(C_STATE, state);
-        char zip[9];
-        MakeNumberString(9, 9, zip, wid-1); /* Zip */
-        row->set_value(C_ZIP, zip);
-        char phone[16];
-        MakeNumberString(16, 16, phone, wid-1); /* Zip */
-        row->set_value(C_PHONE, phone);
-        row->set_value(C_SINCE, 0);
-        row->set_value(C_CREDIT_LIM, 50000);
-        row->set_value(C_DELIVERY_CNT, 0);
-        char c_data[500];
+		row->set_value(C_CITY, street);
+		char state[2];
+		MakeAlphaString(2, 2, state, wid-1); /* State */
+		row->set_value(C_STATE, state);
+		char zip[9];
+    	MakeNumberString(9, 9, zip, wid-1); /* Zip */
+		row->set_value(C_ZIP, zip);
+		char phone[16];
+  		MakeNumberString(16, 16, phone, wid-1); /* Zip */
+		row->set_value(C_PHONE, phone);
+		row->set_value(C_SINCE, 0);
+		row->set_value(C_CREDIT_LIM, 50000);
+		row->set_value(C_DELIVERY_CNT, 0);
+		char c_data[500];
         MakeAlphaString(300, 500, c_data, wid-1);
-        row->set_value(C_DATA, c_data);
+		row->set_value(C_DATA, c_data);
 #endif
         if (RAND(10, wid-1) == 0) {
             char tmp[] = "GC";
@@ -389,8 +389,8 @@ void tpcc_wl::init_tab_hist(uint64_t c_id, uint64_t d_id, uint64_t w_id) {
     row->set_value(H_AMOUNT, 10.0);
 #if !TPCC_SMALL
     char h_data[24];
-    MakeAlphaString(12, 24, h_data, w_id-1);
-    row->set_value(H_DATA, h_data);
+	MakeAlphaString(12, 24, h_data, w_id-1);
+	row->set_value(H_DATA, h_data);
 #endif
 
 }
@@ -439,17 +439,17 @@ void tpcc_wl::init_tab_order(uint64_t did, uint64_t wid) {
             row->set_value(OL_I_ID, URand(1, 100000, wid-1));
 #if !TPCC_SMALL
             row->set_value(OL_SUPPLY_W_ID, wid);
-            if (oid < 2101) {
-                row->set_value(OL_DELIVERY_D, o_entry);
-                row->set_value(OL_AMOUNT, 0);
-            } else {
-                row->set_value(OL_DELIVERY_D, 0);
-                row->set_value(OL_AMOUNT, (double)URand(1, 999999, wid-1)/100);
-            }
-            row->set_value(OL_QUANTITY, 5);
-            char ol_dist_info[24];
-            MakeAlphaString(24, 24, ol_dist_info, wid-1);
-            row->set_value(OL_DIST_INFO, ol_dist_info);
+			if (oid < 2101) {
+				row->set_value(OL_DELIVERY_D, o_entry);
+				row->set_value(OL_AMOUNT, 0);
+			} else {
+				row->set_value(OL_DELIVERY_D, 0);
+				row->set_value(OL_AMOUNT, (double)URand(1, 999999, wid-1)/100);
+			}
+			row->set_value(OL_QUANTITY, 5);
+			char ol_dist_info[24];
+	        MakeAlphaString(24, 24, ol_dist_info, wid-1);
+			row->set_value(OL_DIST_INFO, ol_dist_info);
 #endif
 
             uint64_t ordline_primary = orderlineKey(ol, oid, did, wid);

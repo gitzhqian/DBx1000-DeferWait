@@ -177,7 +177,10 @@ void Stats::print() {
                 outf << "user_abort_cnt=" << _stats[tid]->user_abort_cnt << ", ";
                 outf << "txn_cnt_long=" << _stats[tid]->txn_cnt_long << ", ";
                 outf << "abort_cnt_long=" << _stats[tid]->abort_cnt_long << ", ";
-                outf << "created_long_txn_cnt=" << created_long_txn_cnt[tid] << "\n";
+                outf << "created_long_txn_cnt=" << created_long_txn_cnt[tid] << ", ";
+                outf << "abort_hotspot=" << _stats[tid]->abort_hotspot << ", ";
+                outf << "abort_position=" << _stats[tid]->abort_position << ", ";
+                outf << "abort_position_cnt=" << _stats[tid]->abort_position_cnt << ", " "\n";
             }
 
             total_latency = total_latency / total_txn_cnt;
@@ -199,9 +202,9 @@ void Stats::print() {
         for (uint64_t tid = 0; tid < g_thread_cnt; tid ++) {
             ALL_METRICS(SUM_UP_STATS, SUM_UP_STATS, MAX_STATS)
             // print the proccessing result of each thread to terminal
-            printf("[tid=%lu] txn_cnt=%lu,abort_cnt=%lu, user_abort_cnt=%lu, txn_cnt_long=%lu,abort_cnt_long=%lu, created_long_txn_cnt=%d\n",
+            printf("[tid=%lu] txn_cnt=%lu,abort_cnt=%lu, user_abort_cnt=%lu, txn_cnt_long=%lu,abort_cnt_long=%lu, created_long_txn_cnt=%d,abort_hotspot=%lu,abort_position=%lu,abort_position_cnt=%lu\n",
                    tid, _stats[tid]->txn_cnt, _stats[tid]->abort_cnt,
-                   _stats[tid]->user_abort_cnt, _stats[tid]->txn_cnt_long, _stats[tid]->abort_cnt_long,  created_long_txn_cnt[tid]);
+                   _stats[tid]->user_abort_cnt, _stats[tid]->txn_cnt_long, _stats[tid]->abort_cnt_long,  created_long_txn_cnt[tid], _stats[tid]->abort_hotspot, _stats[tid]->abort_position, _stats[tid]->abort_position_cnt);
         }
 
         total_latency = total_latency / total_txn_cnt;
@@ -217,7 +220,7 @@ void Stats::print() {
         std::cout << "dl_wait_time=" << dl_wait_time / BILLION << "\n";
 
 
-        std::cout << "one_hot_txn_count :" <<  one_hot_txn_count   << "\n";
+//        std::cout << "one_hot_txn_count :" <<  one_hot_txn_count   << "\n";
 #if TEST_BAMBOO
         string path = "/home/zhangqian/Hotspot-Friendly/wound_wr.txt";
         char * output_wound_retired_wr = const_cast<char *>(path.c_str());

@@ -33,8 +33,9 @@ public:
     double local_read_perc;
     ycsb_request * requests;
 
-    //for test
+#if TEST_BB_ABORT
     std::vector<std::pair<uint64_t,bool>> hotspot_set;
+#endif
 
 private:
     // for Zipfian distribution

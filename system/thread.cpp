@@ -23,6 +23,9 @@ void thread_t::init(uint64_t thd_id, workload * workload) {
         _abort_buffer[i].query = NULL;
     _abort_buffer_empty_slots = _abort_buffer_size;
     _abort_buffer_enable = (g_params["abort_buffer_enable"] == "true");
+
+
+    hotspots = new std::set<uint64_t>();
 }
 
 uint64_t thread_t::get_thd_id() { return _thd_id; }
@@ -150,7 +153,7 @@ RC thread_t::run() {
         m_txn->hotspot_friendly_semaphore = 0;
 //                m_txn->wound_txn_id = 0;
         assert(m_txn->hotspot_friendly_semaphore == 0);
-        assert(m_txn->hotspot_friendly_dependency.empty());
+        assert(m_txn->hotspot_friendly_dependency->empty());
 #endif
 
         m_txn->set_txn_id(get_thd_id() + thd_txn_id * g_thread_cnt);

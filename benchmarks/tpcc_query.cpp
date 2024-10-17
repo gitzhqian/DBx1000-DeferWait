@@ -188,22 +188,22 @@ tpcc_query::gen_order_status(uint64_t thd_id) {
 }
 
 void tpcc_query::gen_delivery(uint64_t thd_id) {
-    type = TPCC_DELIVERY;
-
-    if (FIRST_PART_LOCAL) {
-        if (g_num_wh <= g_thread_cnt)
-            w_id = thd_id % g_num_wh + 1;
-        else {
-            do {
-                w_id = RAND((g_num_wh + g_thread_cnt - 1) / g_thread_cnt, thd_id) * g_thread_cnt + thd_id + 1;
-            } while (w_id > g_num_wh);
-            assert((arg.w_id - 1) % g_thread_cnt == thd_id);
-        }
-    } else
-        w_id = URand(1, g_num_wh, thd_id);
-    o_carrier_id = URand(1, DIST_PER_WARE, w_id-1);
-    ol_delivery_d = 2013;
-    n_o_id = URand(2101,3000,w_id-1);
+//    type = TPCC_DELIVERY;
+//
+//    if (FIRST_PART_LOCAL) {
+//        if (g_num_wh <= g_thread_cnt)
+//            w_id = thd_id % g_num_wh + 1;
+//        else {
+//            do {
+//                w_id = RAND((g_num_wh + g_thread_cnt - 1) / g_thread_cnt, thd_id) * g_thread_cnt + thd_id + 1;
+//            } while (w_id > g_num_wh);
+//            assert((arg.w_id - 1) % g_thread_cnt == thd_id);
+//        }
+//    } else
+//        w_id = URand(1, g_num_wh, thd_id);
+//    o_carrier_id = URand(1, DIST_PER_WARE, w_id-1);
+//    ol_delivery_d = 2013;
+//    n_o_id = URand(2101,3000,w_id-1);
 }
 
 void tpcc_query::gen_stock_level(uint64_t thd_id) {

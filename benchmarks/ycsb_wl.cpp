@@ -23,7 +23,7 @@ int ycsb_wl::next_tid;
 RC ycsb_wl::init() {
     workload::init();
     next_tid = 0;
-    string path = "./benchmarks/YCSB_schema.txt";
+    string path = "/home/zhangqian/DBx1000-DeferWait/benchmarks/YCSB_schema.txt";
     init_schema( path );
 
     init_table_parallel();
@@ -188,5 +188,3 @@ RC ycsb_wl::get_txn_man(txn_man *& txn_manager, thread_t * h_thd){
     txn_manager->init(h_thd, this, h_thd->get_thd_id());
     return RCOK;
 }
-
-

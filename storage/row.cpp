@@ -21,17 +21,17 @@
 #include "manager.h"
 
 RC row_t::init(table_t * host_table, uint64_t part_id, uint64_t row_id) {
-  _row_id = row_id;
-  _part_id = part_id;
-  this->table = host_table;
-  Catalog * schema = host_table->get_schema();
-  int tuple_size = schema->get_tuple_size();
-  data = (char *) _mm_malloc(sizeof(char) * tuple_size, 64);
+    _row_id = row_id;
+    _part_id = part_id;
+    this->table = host_table;
+    Catalog * schema = host_table->get_schema();
+    int tuple_size = schema->get_tuple_size();
+    data = (char *) _mm_malloc(sizeof(char) * tuple_size, 64);
 #if CC_ALG == IC3
-  txn_access = NULL;
+    txn_access = NULL;
   orig = NULL;
 #endif
-  return RCOK;
+    return RCOK;
 }
 
 
@@ -44,13 +44,13 @@ row_t::init_accesses(Access * access) {
 
 void row_t::init(int size)
 {
-  data = (char *) _mm_malloc(size, 64);
+    data = (char *) _mm_malloc(size, 64);
 }
 
 RC
 row_t::switch_schema(table_t * host_table) {
-  this->table = host_table;
-  return RCOK;
+    this->table = host_table;
+    return RCOK;
 }
 
 /**
@@ -60,101 +60,101 @@ row_t::switch_schema(table_t * host_table) {
  */
 void row_t::init_manager(row_t * row) {
 #if CC_ALG == DL_DETECT || CC_ALG == NO_WAIT || CC_ALG == WAIT_DIE
-  manager = (Row_lock *) mem_allocator.alloc(sizeof(Row_lock), _part_id);
+    manager = (Row_lock *) mem_allocator.alloc(sizeof(Row_lock), _part_id);
 #elif CC_ALG == TIMESTAMP
-  manager = (Row_ts *) mem_allocator.alloc(sizeof(Row_ts), _part_id);
+    manager = (Row_ts *) mem_allocator.alloc(sizeof(Row_ts), _part_id);
 #elif CC_ALG == MVCC
-  manager = (Row_mvcc *) _mm_malloc(sizeof(Row_mvcc), 64);
+    manager = (Row_mvcc *) _mm_malloc(sizeof(Row_mvcc), 64);
 #elif CC_ALG == HEKATON
-  manager = (Row_hekaton *) _mm_malloc(sizeof(Row_hekaton), 64);
+    manager = (Row_hekaton *) _mm_malloc(sizeof(Row_hekaton), 64);
 #elif CC_ALG == OCC
-  manager = (Row_occ *) mem_allocator.alloc(sizeof(Row_occ), _part_id);
+    manager = (Row_occ *) mem_allocator.alloc(sizeof(Row_occ), _part_id);
 #elif CC_ALG == TICTOC
-  manager = (Row_tictoc *) _mm_malloc(sizeof(Row_tictoc), 64);
+    manager = (Row_tictoc *) _mm_malloc(sizeof(Row_tictoc), 64);
 #elif CC_ALG == SILO
-  manager = (Row_silo *) _mm_malloc(sizeof(Row_silo), 64);
+    manager = (Row_silo *) _mm_malloc(sizeof(Row_silo), 64);
 #elif CC_ALG == VLL
-  manager = (Row_vll *) mem_allocator.alloc(sizeof(Row_vll), _part_id);
+    manager = (Row_vll *) mem_allocator.alloc(sizeof(Row_vll), _part_id);
 #elif CC_ALG == WOUND_WAIT
-  manager = (Row_ww *) mem_allocator.alloc(sizeof(Row_ww), _part_id);
+    manager = (Row_ww *) mem_allocator.alloc(sizeof(Row_ww), _part_id);
 #elif CC_ALG == BAMBOO
-  manager = (Row_bamboo *) mem_allocator.alloc(sizeof(Row_bamboo), _part_id);
+    manager = (Row_bamboo *) mem_allocator.alloc(sizeof(Row_bamboo), _part_id);
   new(manager) Row_bamboo();
 #elif CC_ALG == IC3
-  manager = (Row_ic3 *) _mm_malloc(sizeof(Row_ic3), 64);
+    manager = (Row_ic3 *) _mm_malloc(sizeof(Row_ic3), 64);
 #elif CC_ALG == HOTSPOT_FRIENDLY
-  manager = (Row_hotspot_friendly *) _mm_malloc(sizeof(Row_hotspot_friendly), 64);
+    manager = (Row_hotspot_friendly *) _mm_malloc(sizeof(Row_hotspot_friendly), 64);
 #endif
 
 #if CC_ALG != HSTORE
-  manager->init(this);              // Initialize the manager
+    manager->init(this);              // Initialize the manager
 #endif
 }
 
 table_t * row_t::get_table() {
-  return table;
+    return table;
 }
 
 Catalog * row_t::get_schema() {
-  return get_table()->get_schema();
+    return get_table()->get_schema();
 }
 
 const char * row_t::get_table_name() {
-  return get_table()->get_table_name();
+    return get_table()->get_table_name();
 };
 uint64_t row_t::get_tuple_size() {
-  return get_schema()->get_tuple_size();
+    return get_schema()->get_tuple_size();
 }
 
 uint64_t row_t::get_field_cnt() {
-  return get_schema()->field_cnt;
+    return get_schema()->field_cnt;
 }
 
 void row_t::inc_value(int id, uint64_t val) {
-  int pos = get_schema()->get_field_index(id);
-  ATOM_ADD(data[pos], val);
+    int pos = get_schema()->get_field_index(id);
+    ATOM_ADD(data[pos], val);
 }
 
 void row_t::dec_value(int id, uint64_t val) {
-  int pos = get_schema()->get_field_index(id);
-  ATOM_SUB(data[pos], val);
+    int pos = get_schema()->get_field_index(id);
+    ATOM_SUB(data[pos], val);
 }
 
 void row_t::set_value(int id, void * ptr) {
-  int datasize = get_schema()->get_field_size(id);
-  int pos = get_schema()->get_field_index(id);
+    int datasize = get_schema()->get_field_size(id);
+    int pos = get_schema()->get_field_index(id);
 #if CC_ALG == IC3
-  // assume no blind writes.
+    // assume no blind writes.
   if (txn_access)
     txn_access->wr_accesses = (txn_access->wr_accesses | (1UL << id));
 #endif
-  memcpy( &data[pos], ptr, datasize);
-  //debugging
-  assert(data);
-  assert(ptr);
+    memcpy( &data[pos], ptr, datasize);
+    //debugging
+    assert(data);
+    assert(ptr);
 }
 
 void row_t::set_value(int id, void * ptr, int size) {
-  int pos = get_schema()->get_field_index(id);
+    int pos = get_schema()->get_field_index(id);
 #if CC_ALG == IC3
-  // assume no blind writes.
+    // assume no blind writes.
   if (txn_access)
     txn_access->wr_accesses = (txn_access->wr_accesses | (1UL << id));
 #endif
-  memcpy( &data[pos], ptr, size);
-  //debugging
-  assert(data);
-  assert(ptr);
+    memcpy( &data[pos], ptr, size);
+    //debugging
+    assert(data);
+    assert(ptr);
 }
 
 void row_t::set_value(const char * col_name, void * ptr) {
-  uint64_t id = get_schema()->get_field_id(col_name);
+    uint64_t id = get_schema()->get_field_id(col_name);
 #if CC_ALG == IC3
-  // assume no blind writes.
+    // assume no blind writes.
   if (txn_access)
     txn_access->wr_accesses = (txn_access->wr_accesses | (1UL << id));
 #endif
-  set_value(id, ptr);
+    set_value(id, ptr);
 }
 
 SET_VALUE(uint64_t);
@@ -170,66 +170,66 @@ GET_VALUE(UInt32);
 GET_VALUE(SInt32);
 
 char * row_t::get_value(int idx) {
-  uint64_t id = (uint64_t) idx;
+    uint64_t id = (uint64_t) idx;
 #if CC_ALG == IC3 && IC3_FIELD_LOCKING
-  if (txn_access) {
+    if (txn_access) {
     // try to acquire read access
     this->manager->access(this, id, txn_access);
     txn_access->rd_accesses = (txn_access->rd_accesses | (1UL << id));
   }
 #endif
-  return get_value_plain(id);
+    return get_value_plain(id);
 }
 
 char * row_t::get_value_plain(uint64_t id) {
-  int pos = get_schema()->get_field_index(id);
-  return &data[pos];
+    int pos = get_schema()->get_field_index(id);
+    return &data[pos];
 }
 
 char * row_t::get_value(char * col_name) {
 #if CC_ALG == IC3 && IC3_FIELD_LOCKING
-  if (txn_access) {
+    if (txn_access) {
     uint64_t id = get_schema()->get_field_id(col_name);
     this->manager->access(this, id, txn_access);
     txn_access->rd_accesses = (txn_access->rd_accesses | (1UL << id));
     // copy data from orig row
   }
 #endif
-  uint64_t pos = get_schema()->get_field_index(col_name);
-  return &data[pos];
+    uint64_t pos = get_schema()->get_field_index(col_name);
+    return &data[pos];
 }
 
 char * row_t::get_data() { return data; }
 
 void row_t::set_data(char * data, uint64_t size) {
-  memcpy(this->data, data, size);
-  assert(data);
-  assert(this->data);
+    memcpy(this->data, data, size);
+    assert(data);
+    assert(this->data);
 }
 // copy from the src to this
 void row_t::copy(row_t * src) {
-  set_data(src->get_data(), src->get_tuple_size());
+    set_data(src->get_data(), src->get_tuple_size());
 }
 
 void row_t::set_value_plain(int idx, void * ptr) {
-  int datasize = get_schema()->get_field_size(idx);
-  int pos = get_schema()->get_field_index(idx);
-  memcpy(&data[pos], ptr, datasize);
-  //debugging
-  assert(data);
-  assert(ptr);
+    int datasize = get_schema()->get_field_size(idx);
+    int pos = get_schema()->get_field_index(idx);
+    memcpy(&data[pos], ptr, datasize);
+    //debugging
+    assert(data);
+    assert(ptr);
 }
 
 void row_t::copy(row_t * src, int idx) {
-  char * ptr = src->get_value_plain(idx);
-  set_value_plain(idx, ptr);
-  //debugging
-  assert(data);
-  assert(src->data);
+    char * ptr = src->get_value_plain(idx);
+    set_value_plain(idx, ptr);
+    //debugging
+    assert(data);
+    assert(src->data);
 }
 
 void row_t::free_row() {
-  free(data);
+    free(data);
 }
 
 #if CC_ALG == BAMBOO
@@ -247,14 +247,14 @@ RC row_t::retire_row(BBLockEntry * lock_entry) {
  * @param access : the access object [Empty: no data]
  * @return
  */
-RC row_t::get_row(access_t type, txn_man * txn, row_t *& row, Access * access) {
-  RC rc = RCOK;
+RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) {
+    RC rc = RCOK;
 
-    #if CC_ALG == IC3
-      this->manager->access(access->data, access);
+#if CC_ALG == IC3
+    this->manager->access(access->data, access);
       return rc;
-    #elif CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT || CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO
-      uint64_t thd_id = txn->get_thd_id();
+#elif CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT || CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO
+    uint64_t thd_id = txn->get_thd_id();
       lock_t lt = (type == RD || type == SCAN)? LOCK_SH : LOCK_EX;
       #if CC_ALG == DL_DETECT
       uint64_t * txnids;
@@ -348,8 +348,8 @@ RC row_t::get_row(access_t type, txn_man * txn, row_t *& row, Access * access) {
       }
       row = this;
       return rc;
-    #elif CC_ALG == TIMESTAMP || CC_ALG == MVCC || CC_ALG == HEKATON
-      uint64_t thd_id = txn->get_thd_id();
+#elif CC_ALG == TIMESTAMP || CC_ALG == MVCC || CC_ALG == HEKATON
+    uint64_t thd_id = txn->get_thd_id();
 
         // For TIMESTAMP RD, a new copy of the row will be returned.
         // for MVCC RD, the version will be returned instead of a copy
@@ -379,25 +379,25 @@ RC row_t::get_row(access_t type, txn_man * txn, row_t *& row, Access * access) {
             assert(row->get_schema() == this->get_schema());                // queal table means equal schema
         }
         return rc;
-    #elif CC_ALG == OCC
-        // OCC always make a local copy regardless of read or write
+#elif CC_ALG == OCC
+    // OCC always make a local copy regardless of read or write
         txn->cur_row = (row_t *) mem_allocator.alloc(sizeof(row_t), get_part_id());
         txn->cur_row->init(get_table(), get_part_id());
         rc = this->manager->access(txn, R_REQ);
         row = txn->cur_row;
         return rc;
-    #elif CC_ALG == TICTOC || CC_ALG == SILO
-        // like OCC, tictoc also makes a local copy for each read/write
+#elif CC_ALG == TICTOC || CC_ALG == SILO
+    // like OCC, tictoc also makes a local copy for each read/write
         row->table = get_table();
         TsType ts_type = (type == RD)? R_REQ : P_REQ;
         rc = this->manager->access(txn, ts_type, row);
         return rc;
-    #elif CC_ALG == HSTORE || CC_ALG == VLL
-        row = this;
+#elif CC_ALG == HSTORE || CC_ALG == VLL
+    row = this;
         return rc;
-    #elif CC_ALG == HOTSPOT_FRIENDLY
-        TsType ts_type = (type == RD)? R_REQ : P_REQ;
-        rc = this->manager->access(txn, ts_type, access);
+#elif CC_ALG == HOTSPOT_FRIENDLY
+    TsType ts_type = (type == RD)? R_REQ : P_REQ;
+    rc = this->manager->access(txn, ts_type, access);
 
 //        if (rc == WAIT) {
 //            uint64_t starttime = get_sys_clock();
@@ -415,11 +415,11 @@ RC row_t::get_row(access_t type, txn_man * txn, row_t *& row, Access * access) {
 //            }
 //        }
 
+    return rc;
+#else
+    assert(false);
         return rc;
-    #else
-        assert(false);
-        return rc;
-    #endif
+#endif
 }
 
 
@@ -462,7 +462,7 @@ void row_t::return_row(access_t type, row_t * row, LockEntry * lock_entry) {
 // (cf. row_ts.cpp)
 void row_t::return_row(access_t type, txn_man * txn, row_t * row) {
 #if CC_ALG == TIMESTAMP || CC_ALG == MVCC
-  // for RD or SCAN or XP, the row should be deleted.
+    // for RD or SCAN or XP, the row should be deleted.
 	// because all WR should be companied by a RD
 	// for MVCC RD, the row is not copied, so no need to free. 
   #if CC_ALG == TIMESTAMP
@@ -480,19 +480,19 @@ void row_t::return_row(access_t type, txn_man * txn, row_t * row) {
 		assert(rc == RCOK);
 	}
 #elif CC_ALG == OCC
-  assert (row != NULL);
+    assert (row != NULL);
 	if (type == WR)
 		manager->write( row, txn->end_ts );
 	row->free_row();
 	mem_allocator.free(row, sizeof(row_t));
 	return;
 #elif CC_ALG == TICTOC || CC_ALG == SILO
-  assert (row != NULL);
+    assert (row != NULL);
 	return;
 #elif CC_ALG == HSTORE || CC_ALG == VLL
-  return;
+    return;
 #else
-  assert(false);
+    assert(false);
 #endif
 }
 

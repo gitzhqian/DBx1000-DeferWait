@@ -176,6 +176,10 @@ UInt32 g_cust_per_dist = 3000;
 #endif
 uint64_t g_max_orderline = uint64_t(1) << 32;
 
+//for test
+tbb::concurrent_vector<std::pair<string, std::pair<string,std::pair<string, std::pair<string, string>>>>> wound_retired_wr_list ;
+tbb::concurrent_vector<std::pair<string, std::pair<string,string>>> wound_retired_rd_list ;
+tbb::concurrent_vector<std::pair<string,  string>> wound_owners_list ;
 
 std::atomic<uint64_t> wound_retire_count;
 std::atomic<uint64_t> wound_owner_count;

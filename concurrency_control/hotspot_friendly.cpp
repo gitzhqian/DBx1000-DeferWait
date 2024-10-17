@@ -47,7 +47,7 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
         }
 
 #if HOTSPOT_FRIENDLY_TIMEOUT
-        //         [Timeout]: Make sure the workload can finish.[1 ms(a transaction's average execution time is 0.16ms)]
+//         [Timeout]: Make sure the workload can finish.[1 ms(a transaction's average execution time is 0.16ms)]
         uint64_t span = get_sys_clock() - starttime;
         if(span > ABORT_WAIT_TIME*1000000UL){
             abort_process(this);
@@ -64,9 +64,11 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
         return Abort;
     }
 
-#if PF_MODEL
+#if NO_DIRTY
+#else
+//#if PF_MODEL
     uint64_t starttime = get_sys_clock();
-#endif
+//#endif
     std::stack<std::pair<txn_man*, DepType>> dep_stack;
     uint64_t cur_ts = get_ts();
     for (auto it = i_dependency_on.begin(); it != i_dependency_on.end(); ++it) {
@@ -75,70 +77,88 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
     while(true) {
         if(status == ABORTED){
             abort_process(this);
-
             return Abort;
         }
         if (hotspot_friendly_semaphore == 0 ) {
             break;
         }
 
-        if (i_dependency_on.empty()) {
-            hotspot_friendly_semaphore = 0;
-            break;
-        } else {
-            for (auto & it : i_dependency_on) {
-                dep_stack.push(it);
-            }
+        uint64_t wait_time = get_sys_clock() - starttime;
+//        uint64_t time_out =
 
-            while (!dep_stack.empty()) {
-                auto stk_top = dep_stack.top();
-                if (stk_top.first == nullptr){
-                    i_dependency_on.unsafe_erase(stk_top.first);
-                } else if (stk_top.first->ready_abort) {
-                    // already pass validating, some may not need to abort
-                    // because for write, i always append a new version, i have process it in commit
-                    if (stk_top.second == READ_WRITE_ || stk_top.second == WRITE_WRITE_){
-//                    if (stk_top.second == READ_WRITE_ ){
-                        auto its_ts = stk_top.first->get_ts();
-                        if ( its_ts > cur_ts){             // upgrade again
-                            cur_ts = its_ts +1;
-                            this->set_ts(cur_ts);
-                        }
-                        i_dependency_on.unsafe_erase(stk_top.first);
-                    } else{
-                        abort_process(this);
-#if PF_MODEL
-                        INC_STATS(get_thd_id(), find_circle_abort, 1);
-#endif
-                        return Abort;
-                    }
-                }
-                else if (stk_top.first->status > 1){       // already pass validating
-                    auto dep_txn = stk_top.first;
-                    auto dep_txn_deps = dep_txn->i_dependency_on;
-                    auto itr = dep_txn_deps.find(this);
-                    if (itr != dep_txn_deps.end() && itr->second == WRITE_READ_){
-                        abort_process(this);
-#if PF_MODEL
-                        INC_STATS( get_thd_id(), find_circle_abort, 1);
-#endif
-                        return Abort;
-                    } else{
-                        auto its_ts =  dep_txn->get_ts();
-                        if ( its_ts > cur_ts){             // upgrade again
-                            cur_ts = its_ts +1;
-                            this->set_ts(cur_ts);
-                        }
-                        COMPILER_BARRIER
-                        this->SemaphoreSubOne();
-                        COMPILER_BARRIER
-                        i_dependency_on.unsafe_erase(stk_top.first);
-                    }
-                }
-
-                dep_stack.pop();
-            }
+        if (wait_time > g_timeout){
+//            hotspot_friendly_semaphore = 0;
+//            break;
+            abort_process(this);
+            return Abort;
         }
+
+//        if (i_dependency_on.empty()) {
+//            hotspot_friendly_semaphore = 0;
+//            break;
+//        } else {
+//            for (auto & it : i_dependency_on) {
+//                dep_stack.push(it);
+//            }
+//
+//            while (!dep_stack.empty()) {
+//                auto stk_top = dep_stack.top();
+//                if (stk_top.first == nullptr){
+//                    i_dependency_on.unsafe_erase(stk_top.first);
+//                } else if (stk_top.first->ready_abort) {
+//                    // already pass validating, some may not need to abort
+//                    if (stk_top.second == READ_WRITE_){
+////                        auto its_ts = stk_top.first->get_ts();
+////                        if ( its_ts > cur_ts){             // upgrade again
+////                            cur_ts = its_ts +1;
+////                            this->set_ts(cur_ts);
+////                        }
+//                        i_dependency_on.unsafe_erase(stk_top.first);
+//                    } else{
+//                        abort_process(this);
+//                        return Abort;
+//                    }
+//                }
+//                else if (stk_top.first->status > 1){       // already pass validating
+//                    auto dep_txn = stk_top.first;
+//                    auto dep_txn_deps = dep_txn->i_dependency_on;
+////                    auto itr = dep_txn_deps.find(this);
+////                    if (itr != dep_txn_deps.end()  ){
+////#if PF_MODEL
+////                        INC_STATS(this->get_thd_id(), find_circle_abort, 1);
+////#endif
+////                        abort_process(this);
+////                        return Abort;
+////                    } else{
+////                        for (auto &dep_dep_dep: dep_txn_deps) {
+////                            auto dep_txn_deps_txn = dep_dep_dep.first;
+////                            if (dep_txn_deps_txn != nullptr){
+////                                auto dep_txn_deps_txn_deps = dep_txn_deps_txn->i_dependency_on;
+////                                auto itr2 = dep_txn_deps_txn_deps.find(this);
+////                                if (itr2 != dep_txn_deps_txn_deps.end()  ){
+////                                    auto abrt_Txn = itr2->first;
+////                                    if (abrt_Txn != nullptr){
+////                                        abrt_Txn->set_abort();
+////                                    }
+////                                }
+////                            }
+////                        }
+//
+////                        auto its_ts =  dep_txn->get_ts();
+////                        if ( its_ts > cur_ts){             // upgrade again
+////                            cur_ts = its_ts +1;
+////                            this->set_ts(cur_ts);
+////                        }
+////                        this->SemaphoreSubOne();
+////                        i_dependency_on.unsafe_erase(stk_top.first);
+////                    }
+//                    this->SemaphoreSubOne();
+//                    i_dependency_on.unsafe_erase(stk_top.first);
+//                }
+//
+//                dep_stack.pop();
+//            }
+//        }
 //        printf("hotspot_friendly_semaphore:%lu .\n", hotspot_friendly_semaphore);
     }
 #if PF_MODEL
@@ -146,12 +166,11 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
     INC_STATS(this->get_thd_id(), time_verify, endtime - starttime);
 #endif
 
+#endif
+
     for(auto & dep_pair :*hotspot_friendly_dependency){
-        assert( dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id);
         if (dep_pair.dep_txn != nullptr){
-            COMPILER_BARRIER
             dep_pair.dep_txn->SemaphoreSubOne();
-            COMPILER_BARRIER
             dep_pair.dep_type = INVALID; // Making concurrent_vector correct
         }
     }
@@ -256,7 +275,7 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
                 }
                 newer_version_txn->status_latch = false;
             }
-                // new version is committed
+            // new version is committed
             else{
                 min_next_begin = std::min(min_next_begin,newer_version->begin_ts);
             }
@@ -277,15 +296,13 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
 #endif
 
     this->hotspot_friendly_serial_id =  this->get_ts() ;
-    assert(this->hotspot_friendly_serial_id != 0);
+    if(this->hotspot_friendly_serial_id == 0){
+        // traverse the reads and writes, max of read version and max+1 of write version
+
+    }
 
     // Update status.
-//     while(!ATOM_CAS(status_latch, false, true))
-//         PAUSE
-//     assert(status == validating);
     ATOM_CAS(status, validating, writing);
-//     assert(status == writing);
-//     status_latch = false;
 
 #if DEADLOCK_DETECTION
     for(int rid = 0; rid < wr_cnt; rid++){
@@ -309,7 +326,7 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
          accesses[write_set[rid]]->orig_row->manager->DecreaseThreshold();
 #endif
         accesses[write_set[rid]]->orig_row->manager->blatch = false;
-    }
+     }
 #endif
 
 #if PF_MODEL
@@ -327,9 +344,10 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
 
         auto old_version = new_version->next;
         assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
-        assert(this->hotspot_friendly_serial_id > old_version->begin_ts);
+//        assert(this->hotspot_friendly_serial_id > old_version->begin_ts);
 
 #if NO_DIRTY
+#else
         accesses[rid]->orig_row->manager->lock_row(this);
 #endif
         if (old_version->type == AT){
@@ -381,8 +399,8 @@ RC txn_man::validate_hotspot_friendly(RC rc) {
             }
             dep_pair.dep_txn->SemaphoreSubOne();
         }
-        dep_pair.dep_type = INVALID; // Making concurrent_vector correct
-    }
+         dep_pair.dep_type = INVALID; // Making concurrent_vector correct
+     }
 #endif
 
     // Update status.
@@ -660,20 +678,18 @@ void txn_man::abort_process(txn_man * txn ){
     for(auto & dep_pair :*hotspot_friendly_dependency){
         // only inform the txn which wasn't aborted
 //        if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id){
-        if (dep_pair.dep_txn->status == RUNNING || dep_pair.dep_txn->status == validating){
-//                if ( dep_pair.dep_txn->get_hotspot_friendly_txn_id() == this->wound_txn_id){
-            if ( dep_pair.dep_type == READ_WRITE_ || dep_pair.dep_type == WRITE_WRITE_){
-                COMPILER_BARRIER
-                dep_pair.dep_txn->SemaphoreSubOne();
-                COMPILER_BARRIER
-            } else{
-                dep_pair.dep_txn->ready_abort = true;
+//            if (dep_pair.dep_txn->status == RUNNING ){
+        if ( dep_pair.dep_type == READ_WRITE_){
+            dep_pair.dep_txn->SemaphoreSubOne();
+        } else{
+            if (dep_pair.dep_txn->status == RUNNING ) {
                 dep_pair.dep_txn->set_abort(5);
 #if PF_MODEL
-                INC_STATS(txn->get_thd_id(), find_circle_cascading, 1);
+                INC_STATS(this->get_thd_id(), find_circle_cascading, 1);
 #endif
             }
         }
+//            }
         // Making concurrent_vector correct
         dep_pair.dep_type = INVALID;
     }
@@ -684,22 +700,22 @@ void txn_man::abort_process(txn_man * txn ){
 
 #if DEADLOCK_DETECTION
     /*** Cascading abort */
-    for(auto & dep_pair :hotspot_friendly_dependency){
-        // only inform the txn which wasn't aborted
-        if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id && (dep_pair.dep_txn->status == RUNNING  )){
-            if((dep_pair.dep_type == WRITE_WRITE_) || (dep_pair.dep_type == WRITE_READ_)){
-                dep_pair.dep_txn->set_abort(5);
-            } else{           // Have to release the semaphore of txns who READ_WRITE_ depend on me, otherwise they can never commit and causes deadlock.
-                assert(dep_pair.dep_type == READ_WRITE_);
-                if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id &&  (dep_pair.dep_txn->status == RUNNING )) {         // Recheck: Don't inform txn_manger who is already running another txn. Otherwise, the semaphore of that txn will be decreased too much.
-                    dep_pair.dep_txn->SemaphoreSubOne();
-                }
-            }
-        }
+     for(auto & dep_pair :hotspot_friendly_dependency){
+         // only inform the txn which wasn't aborted
+         if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id && (dep_pair.dep_txn->status == RUNNING  )){
+             if((dep_pair.dep_type == WRITE_WRITE_) || (dep_pair.dep_type == WRITE_READ_)){
+                 dep_pair.dep_txn->set_abort(5);
+             } else{           // Have to release the semaphore of txns who READ_WRITE_ depend on me, otherwise they can never commit and causes deadlock.
+                 assert(dep_pair.dep_type == READ_WRITE_);
+                 if(dep_pair.dep_txn->get_hotspot_friendly_txn_id() == dep_pair.dep_txn_id &&  (dep_pair.dep_txn->status == RUNNING )) {         // Recheck: Don't inform txn_manger who is already running another txn. Otherwise, the semaphore of that txn will be decreased too much.
+                     dep_pair.dep_txn->SemaphoreSubOne();
+                 }
+             }
+         }
 
-        // Making concurrent_vector correct
-        dep_pair.dep_type = INVALID;
-    }
+         // Making concurrent_vector correct
+         dep_pair.dep_type = INVALID;
+     }
 #endif
 
 }
